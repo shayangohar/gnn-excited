@@ -34,3 +34,6 @@ checkpoints/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local agent/project memory
+AGENT_LOG.md
