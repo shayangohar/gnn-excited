@@ -1,0 +1,27 @@
+﻿name: gnn-excited
+channels:
+  - pytorch
+  - pyg
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - h5py
+  - numpy
+  - pyyaml
+  - tqdm
+  - scipy
+  - pytest
+  - rdkit
+  # Current small-run default. Replace with CUDA builds when the RTX 5080 is available.
+  - pytorch
+  - cpuonly
+  - torch-geometric
+  # CPU PyG support for DimeNet++ radius_graph on Python 3.11 / PyTorch 2.12.
+  - https://conda.anaconda.org/conda-forge/win-64/pyg-lib-0.6.0-cpu_py311hfd65b02_4.conda
+  - pip
+  - pip:
+      - --find-links https://data.pyg.org/whl/torch-2.12.0+cpu.html
+      - torch-scatter
+      - torch-sparse
+      - -e .
