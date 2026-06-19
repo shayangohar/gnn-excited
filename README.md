@@ -1,42 +1,55 @@
-﻿# gnn-excited
+# gnn-excited
 
-DimeNet++ models for predicting TD/DFT-style excited-state properties from QCDGE molecular geometries, with a SMILES-facing inference path.
+`gnn-excited` is a research codebase for predicting excited-state properties of small organic molecules with 3D graph neural networks. The initial model target is the lowest singlet excitation, using QCDGE molecular geometries and a DimeNet++ architecture.
 
-## Current Scope
+The long-term goal is to explore whether learned molecular models can provide fast approximations to TD-DFT-style excited-state calculations for early-stage screening and analysis.
 
-This project starts with the QCDGE `A_9.hdf5` subset: QM9 molecules with fewer than 10 heavy atoms. Dataset files are intentionally kept under `data/` and ignored by git.
+## Scope
 
-The v1 model predicts:
+This repository currently focuses on the QCDGE `A_9` subset, which contains QM9-like molecules with fewer than 10 heavy atoms. The first prediction targets are:
 
-- `S1_eV` - lowest singlet excitation energy in eV
-- `S1_f` - oscillator strength for that same lowest singlet
+- `S1_eV`: lowest singlet excitation energy in electronvolts
+- `S1_f`: oscillator strength for the same lowest singlet transition
 
-Training uses QCDGE ground-state atom labels and coordinates as DimeNet++ inputs. Inference accepts a SMILES string, generates one RDKit 3D conformer, and feeds atom types plus coordinates to the trained model.
+Training uses the ground-state molecular geometry from QCDGE:
 
-## Current Status
+- atomic numbers from `ground_state/labels`
+- 3D coordinates from `ground_state/coords`
 
-The CPU validation pipeline is working end-to-end:
+Excited-state fields are used only as supervised learning targets, not as model inputs.
 
-- `A_9.hdf5` is installed locally under `data/` and ignored by git.
-- A 1,000-molecule manifest was generated with 1,000 successful parses and 0 errors.
-- The test suite passes: 7 tests passing.
-- A tiny DimeNet++ CPU overfit run on 16 molecules reduced training loss from 13.109 to 0.001576.
-- SMILES inference works after training from an RDKit-generated conformer.
+## Model Interface
 
-The current environment uses CPU PyTorch. GPU training should wait for the RTX 5080/CUDA environment.
+The public-facing inference interface is a SMILES string. Since DimeNet++ is a 3D molecular graph model, the SMILES string is converted into an approximate 3D conformer before prediction:
+
+1. canonicalize the SMILES string with RDKit
+2. add hydrogens
+3. generate a 3D conformer with ETKDG
+4. optimize with MMFF when available, falling back to UFF
+5. pass atomic numbers and coordinates to DimeNet++
+
+This introduces an important modeling caveat: QCDGE training geometries are quantum-chemistry-derived ground-state geometries, while SMILES inference uses RDKit-generated conformers. This geometry mismatch should be evaluated carefully before interpreting predictions quantitatively.
 
 ## Repository Structure
 
-- `data/` - local datasets and generated manifests. Contents are gitignored.
-- `notebooks/` - Jupyter exploration notebooks.
-- `src/gnn_excited/` - parser, dataset, model, training, and inference code.
-- `scripts/` - command-line entrypoints for manifest building, training, and prediction.
-- `configs/` - small-run training configs.
-- `tests/` - parser, dataset, and inference smoke tests.
+```text
+gnn-excited/
+├── data/               # local datasets and processed manifests; gitignored
+├── notebooks/          # exploratory notebooks
+├── src/gnn_excited/    # parser, dataset, model, training, and inference code
+├── scripts/            # command-line entrypoints
+├── configs/            # training configuration files
+├── tests/              # parser, dataset, and inference tests
+├── environment.yml
+├── pyproject.toml
+└── README.md
+```
 
-## Environment
+Dataset files and generated caches are intentionally excluded from version control.
 
-Current CPU-first setup:
+## Installation
+
+Create the project environment:
 
 ```powershell
 conda env create -f environment.yml
@@ -44,23 +57,23 @@ conda activate gnn-excited
 pip install -e .
 ```
 
-When moving to the RTX 5080, replace the CPU PyTorch install with the matching CUDA-enabled PyTorch and PyTorch Geometric packages.
+The environment file provides a CPU-compatible development setup. For GPU training, install CUDA-compatible PyTorch and PyTorch Geometric packages appropriate for the target system.
 
-## Build a Small Manifest
+## Data Preparation
 
-Start with 100 molecules:
+Place the QCDGE HDF5 file under `data/`:
 
-```powershell
-python scripts/build_manifest.py --hdf5 data/A_9.hdf5 --out data/processed/a9_manifest_100.csv --max-count 100
+```text
+data/A_9.hdf5
 ```
 
-The manifest contains molecule key, atom count, `S1_eV`, `S1_f`, `log1p_S1_f`, parse status, and any parse error.
-
-For the current validation target, build 1,000 molecules:
+Then build a processed manifest:
 
 ```powershell
 python scripts/build_manifest.py --hdf5 data/A_9.hdf5 --out data/processed/a9_manifest_1000.csv --max-count 1000
 ```
+
+The manifest records molecule key, atom count, target values, parse status, and any parse errors. It is used to validate data extraction before training.
 
 Inspect target distributions:
 
@@ -68,23 +81,23 @@ Inspect target distributions:
 python scripts/inspect_targets.py data/processed/a9_manifest_1000.csv
 ```
 
-## Train a Tiny DimeNet++ Run
+## Training
+
+Run a small CPU training job:
 
 ```powershell
 python scripts/train_dimenet.py --config configs/small_cpu.yaml
 ```
 
-This is meant as a correctness smoke test on CPU, not a production-quality training run.
-
-To verify the model can memorize a tiny subset:
+Run a tiny overfit check:
 
 ```powershell
 python scripts/train_dimenet.py --config configs/overfit_16_cpu.yaml
 ```
 
-The overfit run is the main pre-GPU wiring check: parser, PyG batching, DimeNet++ forward/backward pass, loss, optimizer, and checkpointing.
+The overfit check is intended to verify the data parser, PyTorch Geometric batching, DimeNet++ forward/backward pass, optimizer, loss calculation, and checkpoint writing.
 
-## Predict From SMILES
+## SMILES Prediction
 
 After training creates a checkpoint:
 
@@ -92,7 +105,7 @@ After training creates a checkpoint:
 python scripts/predict_smiles.py "CCO" --checkpoint checkpoints/dimenetpp_a9_small.pt
 ```
 
-Output shape:
+Example output:
 
 ```json
 {
@@ -102,3 +115,31 @@ Output shape:
   "geometry_source": "rdkit_etkdg_mmff"
 }
 ```
+
+## Development Status
+
+The current implementation includes:
+
+- lazy parsing of QCDGE HDF5 molecules
+- extraction of lowest singlet excitation energy and oscillator strength
+- processed manifest generation
+- a PyTorch Geometric dataset layer
+- a DimeNet++ training script
+- RDKit-based SMILES-to-geometry inference
+- parser, dataset, and inference smoke tests
+
+The project is in an early validation phase. Current results should be treated as software and workflow validation, not as a benchmarked scientific model.
+
+## Research Directions
+
+Planned extensions include:
+
+- training and evaluating larger DimeNet++ models on expanded QCDGE subsets
+- quantifying the effect of RDKit-generated geometries versus quantum-chemistry geometries
+- adding dataset SMILES alignment when corresponding QCDGE metadata is available
+- comparing direct prediction against delta machine learning approaches
+- evaluating uncertainty, calibration, and chemical-domain generalization
+
+## License
+
+License information has not yet been specified.
