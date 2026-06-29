@@ -8,8 +8,8 @@ The long-term goal is to explore whether learned molecular models can provide fa
 
 This repository currently focuses on the QCDGE `A_9` subset, which contains QM9-like molecules with fewer than 10 heavy atoms. The first prediction targets are:
 
-- `S1_eV`: lowest singlet excitation energy in electronvolts
-- `S1_f`: oscillator strength for the same lowest singlet transition
+- `S1_eV`: lowest singlet excitation energy in electronvolts.
+- `S1_f`: oscillator strength for the same lowest singlet transition.
 
 Training uses the ground-state molecular geometry from QCDGE:
 
