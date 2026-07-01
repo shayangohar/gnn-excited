@@ -3,6 +3,10 @@
 import csv
 import json
 import math
+import os
+import platform
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,6 +63,49 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_json_ready(item) for item in value]
     return value
+
+
+def _run_command(args: list[str]) -> str | None:
+    try:
+        completed = subprocess.run(args, check=True, capture_output=True, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    return completed.stdout.strip()
+
+
+def collect_run_metadata(device: str) -> dict[str, Any]:
+    git_status = _run_command(["git", "status", "--short"])
+    metadata: dict[str, Any] = {
+        "python_version": sys.version,
+        "python_executable": sys.executable,
+        "platform": platform.platform(),
+        "git_commit": _run_command(["git", "rev-parse", "HEAD"]),
+        "git_dirty": bool(git_status),
+        "git_status_short": git_status or "",
+        "slurm": {
+            "job_id": os.environ.get("SLURM_JOB_ID"),
+            "job_name": os.environ.get("SLURM_JOB_NAME"),
+            "partition": os.environ.get("SLURM_JOB_PARTITION"),
+            "node_list": os.environ.get("SLURM_JOB_NODELIST"),
+            "submit_dir": os.environ.get("SLURM_SUBMIT_DIR"),
+        },
+    }
+    if torch is not None:
+        metadata["torch_version"] = torch.__version__
+        metadata["cuda_available"] = torch.cuda.is_available()
+        metadata["cuda_device_count"] = torch.cuda.device_count()
+        metadata["cuda_version"] = torch.version.cuda
+        metadata["cudnn_version"] = torch.backends.cudnn.version()
+        metadata["cuda_device_name"] = (
+            torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else None
+        )
+    try:
+        import torch_geometric
+    except ModuleNotFoundError:
+        metadata["torch_geometric_version"] = None
+    else:
+        metadata["torch_geometric_version"] = torch_geometric.__version__
+    return metadata
 
 
 def write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
@@ -167,7 +214,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         "metrics_csv_path": str(metrics_csv_path),
         "summary_json_path": str(summary_json_path),
         "device": device,
-        "cuda_device_name": torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else None,
+        "environment": collect_run_metadata(device),
         "manifest_ok_rows": manifest_ok_rows,
         "dataset_rows_used": len(rows),
         "split_sizes": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
