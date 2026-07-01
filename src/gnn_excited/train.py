@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import csv
+import json
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,52 @@ def _subset_keys(rows: list[dict[str, str]], indices: list[int]) -> list[str]:
     return [rows[i]["molecule_key"] for i in indices]
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _default_metrics_csv_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_suffix(".metrics.csv")
+
+
+def _default_summary_json_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_suffix(".summary.json")
+
+
+def _json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames: list[str] = []
+    for record in history:
+        for key in record:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with output_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(history)
+
+
+def write_summary_json(path: str | Path, payload: dict[str, Any]) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as stream:
+        json.dump(_json_ready(payload), stream, indent=2, sort_keys=True)
+        stream.write("\n")
+
+
 def batch_mae(pred, target) -> dict[str, float]:
     energy_mae = (pred[:, 0] - target[:, 0]).abs().mean().item()
     log_f_mae = (pred[:, 1] - target[:, 1]).abs().mean().item()
@@ -66,6 +114,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if _IMPORT_ERROR is not None:
         raise ModuleNotFoundError("Training requires torch and torch_geometric.") from _IMPORT_ERROR
 
+    config_path = Path(config_path)
     config = load_config(config_path)
     dataset_cfg = config["dataset"]
     train_cfg = config["training"]
@@ -74,7 +123,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("Config requested CUDA, but torch.cuda.is_available() is False")
 
+    checkpoint_path = Path(train_cfg["checkpoint_path"])
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_csv_path = Path(train_cfg.get("metrics_csv_path") or _default_metrics_csv_path(checkpoint_path))
+    summary_json_path = Path(train_cfg.get("summary_json_path") or _default_summary_json_path(checkpoint_path))
+
     rows = _load_manifest_rows(dataset_cfg["manifest_path"])
+    manifest_ok_rows = len(rows)
     max_rows = dataset_cfg.get("max_manifest_molecules")
     if max_rows is not None:
         rows = rows[: int(max_rows)]
@@ -99,10 +154,31 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
     loss_fn = torch.nn.MSELoss()
-    history = []
+    history: list[dict[str, Any]] = []
     best_val = math.inf
-    checkpoint_path = Path(train_cfg["checkpoint_path"])
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    best_epoch: int | None = None
+    started_at = _utc_now()
+    run_summary: dict[str, Any] = {
+        "status": "running",
+        "started_at": started_at,
+        "updated_at": started_at,
+        "config_path": str(config_path),
+        "checkpoint_path": str(checkpoint_path),
+        "metrics_csv_path": str(metrics_csv_path),
+        "summary_json_path": str(summary_json_path),
+        "device": device,
+        "cuda_device_name": torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else None,
+        "manifest_ok_rows": manifest_ok_rows,
+        "dataset_rows_used": len(rows),
+        "split_sizes": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
+        "config": config,
+        "best_epoch": None,
+        "best_val_loss": None,
+        "latest_epoch": 0,
+        "latest_metrics": None,
+        "test_metrics": None,
+    }
+    write_summary_json(summary_json_path, run_summary)
 
     for epoch in range(1, int(train_cfg["epochs"]) + 1):
         model.train()
@@ -123,10 +199,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {"loss": float("nan")}
         record = {"epoch": epoch, "train_loss": total_loss / max(total_n, 1), **{f"val_{k}": v for k, v in val_metrics.items()}}
         history.append(record)
-        print(record)
+        print(record, flush=True)
+        write_history_csv(metrics_csv_path, history)
+
         val_loss = val_metrics.get("loss", math.inf)
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -136,6 +215,31 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 },
                 checkpoint_path,
             )
+        run_summary.update(
+            {
+                "updated_at": _utc_now(),
+                "best_epoch": best_epoch,
+                "best_val_loss": best_val if math.isfinite(best_val) else None,
+                "latest_epoch": epoch,
+                "latest_metrics": record,
+            }
+        )
+        write_summary_json(summary_json_path, run_summary)
 
     test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
-    return {"history": history, "test_metrics": test_metrics, "checkpoint_path": str(checkpoint_path)}
+    run_summary.update(
+        {
+            "status": "completed",
+            "completed_at": _utc_now(),
+            "updated_at": _utc_now(),
+            "test_metrics": test_metrics,
+        }
+    )
+    write_summary_json(summary_json_path, run_summary)
+    return {
+        "history": history,
+        "test_metrics": test_metrics,
+        "checkpoint_path": str(checkpoint_path),
+        "metrics_csv_path": str(metrics_csv_path),
+        "summary_json_path": str(summary_json_path),
+    }

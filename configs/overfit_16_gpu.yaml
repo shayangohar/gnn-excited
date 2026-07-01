@@ -1,0 +1,33 @@
+﻿dataset:
+  hdf5_path: data/A_9.hdf5
+  manifest_path: data/processed/a9_manifest_10000.csv
+  max_manifest_molecules: 16
+  split_seed: 17
+  train_fraction: 0.875
+  val_fraction: 0.0625
+
+targets:
+  energy: S1_eV
+  oscillator: log1p_S1_f
+
+model:
+  hidden_channels: 32
+  out_channels: 2
+  num_blocks: 2
+  int_emb_size: 16
+  basis_emb_size: 8
+  out_emb_channels: 32
+  num_spherical: 3
+  num_radial: 4
+  cutoff: 5.0
+  max_num_neighbors: 16
+
+training:
+  batch_size: 4
+  epochs: 150
+  learning_rate: 0.001
+  weight_decay: 0.0
+  device: cuda
+  checkpoint_path: checkpoints/dimenetpp_a9_overfit16_gpu.pt
+  metrics_csv_path: runs/dimenetpp_a9_overfit16_gpu.metrics.csv
+  summary_json_path: runs/dimenetpp_a9_overfit16_gpu.summary.json
