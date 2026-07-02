@@ -157,6 +157,27 @@ def evaluate(model, loader, device: str) -> dict[str, float]:
     return {key: value / n for key, value in totals.items()}
 
 
+def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None):
+    if not scheduler_cfg:
+        return None
+    scheduler_type = scheduler_cfg.get("type")
+    if scheduler_type in (None, "none"):
+        return None
+    if scheduler_type != "reduce_on_plateau":
+        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode=str(scheduler_cfg.get("mode", "min")),
+        factor=float(scheduler_cfg.get("factor", 0.5)),
+        patience=int(scheduler_cfg.get("patience", 8)),
+        min_lr=float(scheduler_cfg.get("min_lr", 1e-6)),
+    )
+
+
+def _current_lr(optimizer) -> float:
+    return float(optimizer.param_groups[0]["lr"])
+
+
 def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if _IMPORT_ERROR is not None:
         raise ModuleNotFoundError("Training requires torch and torch_geometric.") from _IMPORT_ERROR
@@ -200,10 +221,17 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         lr=float(train_cfg["learning_rate"]),
         weight_decay=float(train_cfg.get("weight_decay", 0.0)),
     )
+    scheduler = build_scheduler(optimizer, train_cfg.get("scheduler"))
     loss_fn = torch.nn.MSELoss()
     history: list[dict[str, Any]] = []
     best_val = math.inf
     best_epoch: int | None = None
+    min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
+    early_stopping_patience = train_cfg.get("early_stopping_patience")
+    early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
+    epochs_without_improvement = 0
+    stopped_early = False
+    stop_reason = None
     started_at = _utc_now()
     run_summary: dict[str, Any] = {
         "status": "running",
@@ -224,6 +252,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         "latest_epoch": 0,
         "latest_metrics": None,
         "test_metrics": None,
+        "stopped_early": False,
+        "stop_reason": None,
     }
     write_summary_json(summary_json_path, run_summary)
 
@@ -244,15 +274,23 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             total_n += batch_n
 
         val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {"loss": float("nan")}
-        record = {"epoch": epoch, "train_loss": total_loss / max(total_n, 1), **{f"val_{k}": v for k, v in val_metrics.items()}}
+        val_loss = val_metrics.get("loss", math.inf)
+        if scheduler is not None and math.isfinite(val_loss):
+            scheduler.step(val_loss)
+        record = {
+            "epoch": epoch,
+            "train_loss": total_loss / max(total_n, 1),
+            "learning_rate": _current_lr(optimizer),
+            **{f"val_{k}": v for k, v in val_metrics.items()},
+        }
         history.append(record)
         print(record, flush=True)
         write_history_csv(metrics_csv_path, history)
 
-        val_loss = val_metrics.get("loss", math.inf)
-        if val_loss < best_val:
+        if val_loss < best_val - min_delta:
             best_val = val_loss
             best_epoch = epoch
+            epochs_without_improvement = 0
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -262,6 +300,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 },
                 checkpoint_path,
             )
+        else:
+            epochs_without_improvement += 1
         run_summary.update(
             {
                 "updated_at": _utc_now(),
@@ -269,9 +309,29 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 "best_val_loss": best_val if math.isfinite(best_val) else None,
                 "latest_epoch": epoch,
                 "latest_metrics": record,
+                "stopped_early": stopped_early,
+                "stop_reason": stop_reason,
             }
         )
         write_summary_json(summary_json_path, run_summary)
+
+        if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
+            stopped_early = True
+            stop_reason = f"validation loss did not improve for {early_stopping_patience} epochs"
+            run_summary.update(
+                {
+                    "status": "stopped_early",
+                    "updated_at": _utc_now(),
+                    "stopped_early": stopped_early,
+                    "stop_reason": stop_reason,
+                }
+            )
+            write_summary_json(summary_json_path, run_summary)
+            break
+
+    if best_epoch is not None and checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
 
     test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
     run_summary.update(
@@ -279,6 +339,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             "status": "completed",
             "completed_at": _utc_now(),
             "updated_at": _utc_now(),
+            "stopped_early": stopped_early,
+            "stop_reason": stop_reason,
             "test_metrics": test_metrics,
         }
     )

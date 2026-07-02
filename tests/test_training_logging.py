@@ -4,7 +4,9 @@ import csv
 import json
 from pathlib import Path
 
-from gnn_excited.train import collect_run_metadata, write_history_csv, write_summary_json
+import pytest
+
+from gnn_excited.train import build_scheduler, collect_run_metadata, write_history_csv, write_summary_json
 
 
 def test_write_history_csv_uses_union_of_metric_keys(tmp_path: Path) -> None:
@@ -43,3 +45,28 @@ def test_collect_run_metadata_includes_reproducibility_fields(monkeypatch) -> No
     assert "torch_version" in metadata
     assert "torch_geometric_version" in metadata
     assert metadata["slurm"]["job_id"] == "12345"
+
+
+def test_build_scheduler_supports_reduce_on_plateau() -> None:
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=0.01)
+
+    scheduler = build_scheduler(
+        optimizer,
+        {"type": "reduce_on_plateau", "factor": 0.5, "patience": 0, "min_lr": 1e-6},
+    )
+
+    assert scheduler is not None
+    scheduler.step(1.0)
+    scheduler.step(1.0)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(0.005)
+
+
+def test_build_scheduler_rejects_unknown_type() -> None:
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=0.01)
+
+    with pytest.raises(ValueError, match="Unsupported scheduler type"):
+        build_scheduler(optimizer, {"type": "cosine"})
