@@ -153,8 +153,6 @@ Planned extensions include:
 - comparing direct prediction against delta machine learning approaches
 - evaluating uncertainty, calibration, and chemical-domain generalization
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged research plan.
-
 ## License
 
 License information has not yet been specified.
