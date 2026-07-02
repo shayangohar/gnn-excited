@@ -75,6 +75,12 @@ python scripts/build_manifest.py --hdf5 data/A_9.hdf5 --out data/processed/a9_ma
 
 The manifest records molecule key, atom count, target values, parse status, and any parse errors. It is used to validate data extraction before training.
 
+The default manifest contains the current baseline targets, `S1_eV` and `S1_f`. Fixed-count multi-state manifests can also be generated for later experiments:
+
+```powershell
+python scripts/build_manifest.py --hdf5 data/A_9.hdf5 --out data/processed/a9_manifest_s5.csv --max-count 10000 --singlets 5 --triplets 0
+```
+
 Inspect target distributions:
 
 ```powershell
@@ -96,6 +102,12 @@ python scripts/train_dimenet.py --config configs/overfit_16_cpu.yaml
 ```
 
 The overfit check is intended to verify the data parser, PyTorch Geometric batching, DimeNet++ forward/backward pass, optimizer, loss calculation, and checkpoint writing.
+
+Compare completed training runs:
+
+```powershell
+python scripts/compare_runs.py runs/dimenetpp_a9_10k_gpu.summary.json runs/dimenetpp_a9_10k_gpu_long.summary.json
+```
 
 ## SMILES Prediction
 
@@ -135,10 +147,13 @@ The project is in an early validation phase. Current results should be treated a
 Planned extensions include:
 
 - training and evaluating larger DimeNet++ models on expanded QCDGE subsets
+- extending targets from `S1` to fixed-count singlet and triplet manifolds
 - quantifying the effect of RDKit-generated geometries versus quantum-chemistry geometries
 - adding dataset SMILES alignment when corresponding QCDGE metadata is available
 - comparing direct prediction against delta machine learning approaches
 - evaluating uncertainty, calibration, and chemical-domain generalization
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the staged research plan.
 
 ## License
 

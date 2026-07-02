@@ -27,6 +27,26 @@ class S1Target:
         return math.log1p(self.s1_f)
 
 
+@dataclass(frozen=True)
+class ExcitedStateTarget:
+    state_index: int
+    state_type: str
+    excitation_e_ev: float
+    oscillator_strength: float
+
+    @property
+    def log1p_oscillator_strength(self) -> float:
+        return math.log1p(self.oscillator_strength)
+
+
+@dataclass(frozen=True)
+class MultiStateTarget:
+    molecule_key: str
+    atom_count: int
+    singlets: tuple[ExcitedStateTarget, ...]
+    triplets: tuple[ExcitedStateTarget, ...]
+
+
 def parse_energy_ev(value: Any) -> float:
     """Parse QCDGE energy strings such as '7.7710 eV' into eV floats."""
     if isinstance(value, bytes):
@@ -55,19 +75,27 @@ def decode_excited_state_info(raw: Any) -> dict[str, Any]:
 
 def extract_lowest_singlet(info: dict[str, Any]) -> tuple[int, float, float]:
     """Return (state_index, excitation_e_eV, oscillator_strength) for S1."""
-    singlets: list[tuple[int, float, float]] = []
+    singlets = extract_excited_states(info, "Singlet")
+    if not singlets:
+        raise ValueError("No singlet excited states found")
+    state = singlets[0]
+    return state.state_index, state.excitation_e_ev, state.oscillator_strength
+
+
+def extract_excited_states(info: dict[str, Any], state_type: str) -> list[ExcitedStateTarget]:
+    """Return excited states of one type sorted by increasing excitation energy."""
+    selected: list[ExcitedStateTarget] = []
+    expected_type = state_type.lower()
     for key, record in info.items():
-        if str(record.get("state_type", "")).lower() != "singlet":
+        if str(record.get("state_type", "")).lower() != expected_type:
             continue
         state_index = int(record.get("state", key))
         energy = parse_energy_ev(record["excitation_e_eV"])
         osc = float(record.get("oscillator_trength", 0.0))
         if osc < 0:
             raise ValueError(f"Negative oscillator strength for state {state_index}: {osc}")
-        singlets.append((state_index, energy, osc))
-    if not singlets:
-        raise ValueError("No singlet excited states found")
-    return min(singlets, key=lambda item: item[1])
+        selected.append(ExcitedStateTarget(state_index, state_type, energy, osc))
+    return sorted(selected, key=lambda item: item.excitation_e_ev)
 
 
 def _flatten_labels(labels: np.ndarray) -> np.ndarray:
@@ -102,6 +130,26 @@ def s1_target_from_group(molecule_key: str, mol: h5py.Group) -> S1Target:
     return S1Target(str(molecule_key), len(z), s1_ev, s1_f, state_index)
 
 
+def multistate_target_from_group(
+    molecule_key: str,
+    mol: h5py.Group,
+    singlet_count: int = 5,
+    triplet_count: int = 0,
+) -> MultiStateTarget:
+    """Extract fixed-count singlet/triplet targets from an already-open molecule group."""
+    if singlet_count < 0 or triplet_count < 0:
+        raise ValueError("singlet_count and triplet_count must be non-negative")
+    z = _flatten_labels(mol["ground_state"]["labels"][()])
+    info = decode_excited_state_info(mol["excited_state"]["Info_of_AllExcitedStates"])
+    singlets = tuple(extract_excited_states(info, "Singlet")[:singlet_count])
+    triplets = tuple(extract_excited_states(info, "Triplet")[:triplet_count])
+    if len(singlets) < singlet_count:
+        raise ValueError(f"Expected {singlet_count} singlets, found {len(singlets)}")
+    if len(triplets) < triplet_count:
+        raise ValueError(f"Expected {triplet_count} triplets, found {len(triplets)}")
+    return MultiStateTarget(str(molecule_key), len(z), singlets, triplets)
+
+
 def iter_molecule_keys(hdf5_path: str | Path, max_count: int | None = None) -> Iterable[str]:
     """Yield molecule keys lazily from the HDF5 root group."""
     with h5py.File(hdf5_path, "r") as handle:
@@ -116,22 +164,27 @@ def build_manifest(
     output_path: str | Path,
     max_count: int | None = None,
     progress_every: int = 25,
+    singlet_count: int = 1,
+    triplet_count: int = 0,
 ) -> dict[str, int]:
     """Build a CSV manifest with parse status for each attempted molecule."""
     hdf5_path = Path(hdf5_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     counts = {"ok": 0, "error": 0}
+    if singlet_count < 1:
+        raise ValueError("singlet_count must be at least 1 for the current S1 training path")
+    if triplet_count < 0:
+        raise ValueError("triplet_count must be non-negative")
     fieldnames = [
         "molecule_key",
         "atom_count",
-        "S1_eV",
-        "S1_f",
-        "log1p_S1_f",
-        "s1_state_index",
-        "status",
-        "error",
     ]
+    for idx in range(1, singlet_count + 1):
+        fieldnames.extend([f"S{idx}_eV", f"S{idx}_f", f"log1p_S{idx}_f", f"s{idx}_state_index"])
+    for idx in range(1, triplet_count + 1):
+        fieldnames.extend([f"T{idx}_eV", f"T{idx}_f", f"log1p_T{idx}_f", f"t{idx}_state_index"])
+    fieldnames.extend(["status", "error"])
     with output_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
@@ -141,33 +194,27 @@ def build_manifest(
                 if max_count is not None and seen > max_count:
                     break
                 try:
-                    target = s1_target_from_group(str(key), handle[str(key)])
-                    writer.writerow(
-                        {
-                            "molecule_key": target.molecule_key,
-                            "atom_count": target.atom_count,
-                            "S1_eV": target.s1_ev,
-                            "S1_f": target.s1_f,
-                            "log1p_S1_f": target.log1p_s1_f,
-                            "s1_state_index": target.state_index,
-                            "status": "ok",
-                            "error": "",
-                        }
-                    )
+                    target = multistate_target_from_group(str(key), handle[str(key)], singlet_count, triplet_count)
+                    row: dict[str, Any] = {
+                        "molecule_key": target.molecule_key,
+                        "atom_count": target.atom_count,
+                        "status": "ok",
+                        "error": "",
+                    }
+                    for idx, state in enumerate(target.singlets, start=1):
+                        row[f"S{idx}_eV"] = state.excitation_e_ev
+                        row[f"S{idx}_f"] = state.oscillator_strength
+                        row[f"log1p_S{idx}_f"] = state.log1p_oscillator_strength
+                        row[f"s{idx}_state_index"] = state.state_index
+                    for idx, state in enumerate(target.triplets, start=1):
+                        row[f"T{idx}_eV"] = state.excitation_e_ev
+                        row[f"T{idx}_f"] = state.oscillator_strength
+                        row[f"log1p_T{idx}_f"] = state.log1p_oscillator_strength
+                        row[f"t{idx}_state_index"] = state.state_index
+                    writer.writerow(row)
                     counts["ok"] += 1
                 except Exception as exc:  # noqa: BLE001 - manifest should record parse failures.
-                    writer.writerow(
-                        {
-                            "molecule_key": key,
-                            "atom_count": "",
-                            "S1_eV": "",
-                            "S1_f": "",
-                            "log1p_S1_f": "",
-                            "s1_state_index": "",
-                            "status": "error",
-                            "error": str(exc),
-                        }
-                    )
+                    writer.writerow({"molecule_key": key, "atom_count": "", "status": "error", "error": str(exc)})
                     counts["error"] += 1
                 if progress_every and seen % progress_every == 0:
                     print(f"processed {seen} molecules ({counts['ok']} ok, {counts['error']} errors)", flush=True)

@@ -7,11 +7,19 @@ from gnn_excited.data.qcdge import build_manifest
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a QCDGE S1 manifest from A_9.hdf5.")
+    parser = argparse.ArgumentParser(description="Build a QCDGE excited-state manifest from A_9.hdf5.")
     parser.add_argument("--hdf5", default="data/A_9.hdf5", help="Path to QCDGE HDF5 subset")
     parser.add_argument("--out", default="data/processed/a9_manifest_100.csv", help="Output CSV path")
     parser.add_argument("--max-count", type=int, default=100, help="Maximum molecules to inspect")
+    parser.add_argument("--singlets", type=int, default=1, help="Number of lowest singlet states to include")
+    parser.add_argument("--triplets", type=int, default=0, help="Number of lowest triplet states to include")
     args = parser.parse_args()
 
-    counts = build_manifest(Path(args.hdf5), Path(args.out), max_count=args.max_count)
+    counts = build_manifest(
+        Path(args.hdf5),
+        Path(args.out),
+        max_count=args.max_count,
+        singlet_count=args.singlets,
+        triplet_count=args.triplets,
+    )
     print(f"wrote {args.out}: {counts['ok']} ok, {counts['error']} errors")

@@ -7,7 +7,15 @@ import h5py
 import numpy as np
 import pytest
 
-from gnn_excited.data.qcdge import build_manifest, extract_lowest_singlet, parse_energy_ev, read_molecule_arrays, read_s1_target
+from gnn_excited.data.qcdge import (
+    build_manifest,
+    extract_excited_states,
+    extract_lowest_singlet,
+    multistate_target_from_group,
+    parse_energy_ev,
+    read_molecule_arrays,
+    read_s1_target,
+)
 
 
 def _write_test_hdf5(path: Path) -> None:
@@ -43,6 +51,19 @@ def test_extract_lowest_singlet() -> None:
     assert osc == pytest.approx(0.1)
 
 
+def test_extract_excited_states_sorts_by_energy() -> None:
+    states = extract_excited_states(
+        {
+            "1": {"state": 1, "state_type": "Singlet", "excitation_e_eV": "5.0 eV", "oscillator_trength": 0.4},
+            "2": {"state": 2, "state_type": "Triplet", "excitation_e_eV": "2.0 eV", "oscillator_trength": 0.0},
+            "3": {"state": 3, "state_type": "Singlet", "excitation_e_eV": "4.0 eV", "oscillator_trength": 0.1},
+        },
+        "Singlet",
+    )
+    assert [state.state_index for state in states] == [3, 1]
+    assert [state.excitation_e_ev for state in states] == pytest.approx([4.0, 5.0])
+
+
 def test_read_s1_target_and_arrays_from_synthetic_hdf5(tmp_path: Path) -> None:
     hdf5_path = tmp_path / "sample.hdf5"
     _write_test_hdf5(hdf5_path)
@@ -58,6 +79,19 @@ def test_read_s1_target_and_arrays_from_synthetic_hdf5(tmp_path: Path) -> None:
     assert pos.shape == (4, 3)
 
 
+def test_multistate_target_from_group_requires_fixed_count(tmp_path: Path) -> None:
+    hdf5_path = tmp_path / "sample.hdf5"
+    _write_test_hdf5(hdf5_path)
+
+    with h5py.File(hdf5_path, "r") as handle:
+        target = multistate_target_from_group("10", handle["10"], singlet_count=2, triplet_count=1)
+        assert [state.state_index for state in target.singlets] == [3, 2]
+        assert [state.state_index for state in target.triplets] == [1]
+
+        with pytest.raises(ValueError, match="Expected 3 singlets"):
+            multistate_target_from_group("10", handle["10"], singlet_count=3, triplet_count=0)
+
+
 def test_build_manifest_records_parse_status(tmp_path: Path) -> None:
     hdf5_path = tmp_path / "sample.hdf5"
     manifest_path = tmp_path / "manifest.csv"
@@ -68,6 +102,19 @@ def test_build_manifest_records_parse_status(tmp_path: Path) -> None:
     assert counts == {"ok": 1, "error": 0}
     assert "S1_eV" in text
     assert "3.7" in text
+
+
+def test_build_manifest_can_emit_multistate_columns(tmp_path: Path) -> None:
+    hdf5_path = tmp_path / "sample.hdf5"
+    manifest_path = tmp_path / "manifest.csv"
+    _write_test_hdf5(hdf5_path)
+
+    counts = build_manifest(hdf5_path, manifest_path, max_count=1, singlet_count=2, triplet_count=1)
+    text = manifest_path.read_text(encoding="utf-8")
+    assert counts == {"ok": 1, "error": 0}
+    assert "S2_eV" in text
+    assert "T1_eV" in text
+    assert "4.1" in text
 
 
 def test_real_a9_known_key_if_present() -> None:
