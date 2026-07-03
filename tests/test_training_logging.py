@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from gnn_excited.train import build_scheduler, collect_run_metadata, write_history_csv, write_summary_json
+from gnn_excited.train import (
+    build_scheduler,
+    classify_validation_improvement,
+    collect_run_metadata,
+    write_history_csv,
+    write_summary_json,
+)
 
 
 def test_write_history_csv_uses_union_of_metric_keys(tmp_path: Path) -> None:
@@ -70,3 +76,15 @@ def test_build_scheduler_rejects_unknown_type() -> None:
 
     with pytest.raises(ValueError, match="Unsupported scheduler type"):
         build_scheduler(optimizer, {"type": "cosine"})
+
+
+def test_validation_improvement_separates_checkpoint_from_early_stopping() -> None:
+    improvement = classify_validation_improvement(
+        val_loss=0.99995,
+        best_val=1.0,
+        early_stopping_best_val=1.0,
+        min_delta=0.0001,
+    )
+
+    assert improvement["checkpoint_improved"] is True
+    assert improvement["early_stopping_improved"] is False

@@ -178,6 +178,14 @@ def _current_lr(optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"])
 
 
+def classify_validation_improvement(val_loss: float, best_val: float, early_stopping_best_val: float, min_delta: float):
+    """Separate checkpoint-saving improvement from early-stopping improvement."""
+    return {
+        "checkpoint_improved": val_loss < best_val,
+        "early_stopping_improved": val_loss < early_stopping_best_val - min_delta,
+    }
+
+
 def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if _IMPORT_ERROR is not None:
         raise ModuleNotFoundError("Training requires torch and torch_geometric.") from _IMPORT_ERROR
@@ -226,6 +234,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     history: list[dict[str, Any]] = []
     best_val = math.inf
     best_epoch: int | None = None
+    early_stopping_best_val = math.inf
     min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
     early_stopping_patience = train_cfg.get("early_stopping_patience")
     early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
@@ -287,10 +296,10 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         print(record, flush=True)
         write_history_csv(metrics_csv_path, history)
 
-        if val_loss < best_val - min_delta:
+        improvement = classify_validation_improvement(val_loss, best_val, early_stopping_best_val, min_delta)
+        if improvement["checkpoint_improved"]:
             best_val = val_loss
             best_epoch = epoch
-            epochs_without_improvement = 0
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -300,6 +309,10 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 },
                 checkpoint_path,
             )
+
+        if improvement["early_stopping_improved"]:
+            early_stopping_best_val = val_loss
+            epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
         run_summary.update(
