@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from gnn_excited.train import (
+    WandbRun,
     build_scheduler,
     classify_validation_improvement,
     collect_run_metadata,
@@ -88,3 +89,10 @@ def test_validation_improvement_separates_checkpoint_from_early_stopping() -> No
 
     assert improvement["checkpoint_improved"] is True
     assert improvement["early_stopping_improved"] is False
+
+
+def test_wandb_run_disabled_without_importing_wandb() -> None:
+    run = WandbRun({"wandb": {"enabled": False}}, {"config_path": "config.yaml"})
+
+    assert run.enabled is False
+    assert run.metadata() is None

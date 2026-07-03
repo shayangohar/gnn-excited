@@ -130,6 +130,67 @@ def write_summary_json(path: str | Path, payload: dict[str, Any]) -> None:
         stream.write("\n")
 
 
+class WandbRun:
+    def __init__(self, config: dict[str, Any], run_summary: dict[str, Any]) -> None:
+        self._run = None
+        self._wandb = None
+        wandb_cfg = config.get("wandb") or {}
+        if not wandb_cfg.get("enabled", False):
+            return
+        try:
+            import wandb
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Config enabled W&B logging, but wandb is not installed.") from exc
+
+        self._wandb = wandb
+        init_kwargs = {
+            "project": wandb_cfg.get("project", "gnn-excited"),
+            "entity": wandb_cfg.get("entity"),
+            "name": wandb_cfg.get("name"),
+            "group": wandb_cfg.get("group"),
+            "tags": wandb_cfg.get("tags"),
+            "mode": wandb_cfg.get("mode"),
+            "job_type": wandb_cfg.get("job_type", "train"),
+            "config": _json_ready(
+                {
+                    "config": config,
+                    "run_summary": {
+                        key: value
+                        for key, value in run_summary.items()
+                        if key not in {"latest_metrics", "test_metrics"}
+                    },
+                }
+            ),
+        }
+        self._run = wandb.init(**{key: value for key, value in init_kwargs.items() if value is not None})
+
+    @property
+    def enabled(self) -> bool:
+        return self._run is not None
+
+    def metadata(self) -> dict[str, str] | None:
+        if self._run is None:
+            return None
+        return {"id": self._run.id, "name": self._run.name, "url": self._run.url}
+
+    def log_epoch(self, record: dict[str, Any]) -> None:
+        if self._wandb is None:
+            return
+        self._wandb.log(record, step=int(record["epoch"]))
+
+    def log_test_metrics(self, metrics: dict[str, float], best_epoch: int | None) -> None:
+        if self._wandb is None:
+            return
+        payload = {f"test_{key}": value for key, value in metrics.items()}
+        if best_epoch is not None:
+            payload["best_epoch"] = best_epoch
+        self._wandb.log(payload)
+
+    def finish(self) -> None:
+        if self._wandb is not None:
+            self._wandb.finish()
+
+
 def batch_mae(pred, target) -> dict[str, float]:
     energy_mae = (pred[:, 0] - target[:, 0]).abs().mean().item()
     log_f_mae = (pred[:, 1] - target[:, 1]).abs().mean().item()
@@ -266,105 +327,114 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         "stop_reason": None,
     }
     write_summary_json(summary_json_path, run_summary)
-
-    for epoch in range(1, int(train_cfg["epochs"]) + 1):
-        model.train()
-        total_loss = 0.0
-        total_n = 0
-        for batch in train_loader:
-            batch = batch.to(device)
-            target = batch.y.view(-1, 2)
-            pred = model(batch.z, batch.pos, batch.batch).view(-1, 2)
-            loss = loss_fn(pred, target)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
-            optimizer.step()
-            batch_n = target.shape[0]
-            total_loss += loss.item() * batch_n
-            total_n += batch_n
-
-        val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {"loss": float("nan")}
-        val_loss = val_metrics.get("loss", math.inf)
-        if scheduler is not None and math.isfinite(val_loss):
-            scheduler.step(val_loss)
-        record = {
-            "epoch": epoch,
-            "train_loss": total_loss / max(total_n, 1),
-            "learning_rate": _current_lr(optimizer),
-            **{f"val_{k}": v for k, v in val_metrics.items()},
-        }
-        history.append(record)
-        print(record, flush=True)
-        write_history_csv(metrics_csv_path, history)
-
-        improvement = classify_validation_improvement(val_loss, best_val, early_stopping_best_val, min_delta)
-        if improvement["checkpoint_improved"]:
-            best_val = val_loss
-            best_epoch = epoch
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "model_kwargs": model_kwargs,
-                    "config": config,
-                    "history": history,
-                },
-                checkpoint_path,
-            )
-
-        if improvement["early_stopping_improved"]:
-            early_stopping_best_val = val_loss
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-        run_summary.update(
-            {
-                "updated_at": _utc_now(),
-                "best_epoch": best_epoch,
-                "best_val_loss": best_val if math.isfinite(best_val) else None,
-                "latest_epoch": epoch,
-                "latest_metrics": record,
-                "stopped_early": stopped_early,
-                "stop_reason": stop_reason,
-            }
-        )
+    wandb_run = WandbRun(config, run_summary)
+    if wandb_run.enabled:
+        run_summary["wandb"] = wandb_run.metadata()
         write_summary_json(summary_json_path, run_summary)
 
-        if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
-            stopped_early = True
-            stop_reason = f"validation loss did not improve for {early_stopping_patience} epochs"
+    try:
+        for epoch in range(1, int(train_cfg["epochs"]) + 1):
+            model.train()
+            total_loss = 0.0
+            total_n = 0
+            for batch in train_loader:
+                batch = batch.to(device)
+                target = batch.y.view(-1, 2)
+                pred = model(batch.z, batch.pos, batch.batch).view(-1, 2)
+                loss = loss_fn(pred, target)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                optimizer.step()
+                batch_n = target.shape[0]
+                total_loss += loss.item() * batch_n
+                total_n += batch_n
+
+            val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {"loss": float("nan")}
+            val_loss = val_metrics.get("loss", math.inf)
+            if scheduler is not None and math.isfinite(val_loss):
+                scheduler.step(val_loss)
+            record = {
+                "epoch": epoch,
+                "train_loss": total_loss / max(total_n, 1),
+                "learning_rate": _current_lr(optimizer),
+                **{f"val_{key}": value for key, value in val_metrics.items()},
+            }
+            history.append(record)
+            print(record, flush=True)
+            write_history_csv(metrics_csv_path, history)
+            wandb_run.log_epoch(record)
+
+            improvement = classify_validation_improvement(val_loss, best_val, early_stopping_best_val, min_delta)
+            if improvement["checkpoint_improved"]:
+                best_val = val_loss
+                best_epoch = epoch
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "model_kwargs": model_kwargs,
+                        "config": config,
+                        "history": history,
+                    },
+                    checkpoint_path,
+                )
+
+            if improvement["early_stopping_improved"]:
+                early_stopping_best_val = val_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
             run_summary.update(
                 {
-                    "status": "stopped_early",
                     "updated_at": _utc_now(),
+                    "best_epoch": best_epoch,
+                    "best_val_loss": best_val if math.isfinite(best_val) else None,
+                    "latest_epoch": epoch,
+                    "latest_metrics": record,
                     "stopped_early": stopped_early,
                     "stop_reason": stop_reason,
                 }
             )
             write_summary_json(summary_json_path, run_summary)
-            break
 
-    if best_epoch is not None and checkpoint_path.exists():
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
+            if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
+                stopped_early = True
+                stop_reason = f"validation loss did not improve for {early_stopping_patience} epochs"
+                run_summary.update(
+                    {
+                        "status": "stopped_early",
+                        "updated_at": _utc_now(),
+                        "stopped_early": stopped_early,
+                        "stop_reason": stop_reason,
+                    }
+                )
+                write_summary_json(summary_json_path, run_summary)
+                break
 
-    test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
-    run_summary.update(
-        {
-            "status": "completed",
-            "completed_at": _utc_now(),
-            "updated_at": _utc_now(),
-            "stopped_early": stopped_early,
-            "stop_reason": stop_reason,
+        if best_epoch is not None and checkpoint_path.exists():
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint["model_state_dict"])
+
+        test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
+        wandb_run.log_test_metrics(test_metrics, best_epoch)
+        run_summary.update(
+            {
+                "status": "completed",
+                "completed_at": _utc_now(),
+                "updated_at": _utc_now(),
+                "stopped_early": stopped_early,
+                "stop_reason": stop_reason,
+                "test_metrics": test_metrics,
+            }
+        )
+        write_summary_json(summary_json_path, run_summary)
+        return {
+            "history": history,
             "test_metrics": test_metrics,
+            "checkpoint_path": str(checkpoint_path),
+            "metrics_csv_path": str(metrics_csv_path),
+            "summary_json_path": str(summary_json_path),
         }
-    )
-    write_summary_json(summary_json_path, run_summary)
-    return {
-        "history": history,
-        "test_metrics": test_metrics,
-        "checkpoint_path": str(checkpoint_path),
-        "metrics_csv_path": str(metrics_csv_path),
-        "summary_json_path": str(summary_json_path),
-    }
+    finally:
+        wandb_run.finish()
