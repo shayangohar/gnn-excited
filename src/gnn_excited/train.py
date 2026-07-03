@@ -238,6 +238,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
     early_stopping_patience = train_cfg.get("early_stopping_patience")
     early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
+    max_grad_norm = float(train_cfg.get("max_grad_norm", 0.0))
     epochs_without_improvement = 0
     stopped_early = False
     stop_reason = None
@@ -277,6 +278,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             loss = loss_fn(pred, target)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
             optimizer.step()
             batch_n = target.shape[0]
             total_loss += loss.item() * batch_n
