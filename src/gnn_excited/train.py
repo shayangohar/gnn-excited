@@ -1,12 +1,14 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
 import math
 import os
 import platform
+import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,17 +30,35 @@ from gnn_excited.models.dimenetpp import build_dimenetpp
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
-    with Path(path).open("r", encoding="utf-8") as stream:
+    with Path(path).open('r', encoding='utf-8') as stream:
         return yaml.safe_load(stream)
 
 
 def _load_manifest_rows(path: str | Path) -> list[dict[str, str]]:
-    with Path(path).open("r", newline="", encoding="utf-8") as stream:
-        return [row for row in csv.DictReader(stream) if row.get("status") == "ok"]
+    with Path(path).open('r', newline='', encoding='utf-8') as stream:
+        return [row for row in csv.DictReader(stream) if row.get('status') == 'ok']
 
 
 def _subset_keys(rows: list[dict[str, str]], indices: list[int]) -> list[str]:
-    return [rows[i]["molecule_key"] for i in indices]
+    return [rows[i]['molecule_key'] for i in indices]
+
+
+def _source_subset_from_key(molecule_key: str) -> str:
+    prefix = ''.join(ch for ch in str(molecule_key) if ch.isalpha())
+    return {
+        'Aa': 'A_9',
+        'Ab': 'A_10',
+        'Ba': 'B_9',
+        'Bb': 'B_10',
+    }.get(prefix, prefix or 'unknown')
+
+
+def _subset_key_groups(rows: list[dict[str, str]], indices: list[int]) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for index in indices:
+        key = rows[index]['molecule_key']
+        groups.setdefault(_source_subset_from_key(key), []).append(key)
+    return dict(sorted(groups.items()))
 
 
 def _utc_now() -> str:
@@ -46,11 +66,11 @@ def _utc_now() -> str:
 
 
 def _default_metrics_csv_path(checkpoint_path: Path) -> Path:
-    return checkpoint_path.with_suffix(".metrics.csv")
+    return checkpoint_path.with_suffix('.metrics.csv')
 
 
 def _default_summary_json_path(checkpoint_path: Path) -> Path:
-    return checkpoint_path.with_suffix(".summary.json")
+    return checkpoint_path.with_suffix('.summary.json')
 
 
 def _json_ready(value: Any) -> Any:
@@ -74,38 +94,93 @@ def _run_command(args: list[str]) -> str | None:
 
 
 def collect_run_metadata(device: str) -> dict[str, Any]:
-    git_status = _run_command(["git", "status", "--short"])
+    git_status = _run_command(['git', 'status', '--short'])
     metadata: dict[str, Any] = {
-        "python_version": sys.version,
-        "python_executable": sys.executable,
-        "platform": platform.platform(),
-        "git_commit": _run_command(["git", "rev-parse", "HEAD"]),
-        "git_dirty": bool(git_status),
-        "git_status_short": git_status or "",
-        "slurm": {
-            "job_id": os.environ.get("SLURM_JOB_ID"),
-            "job_name": os.environ.get("SLURM_JOB_NAME"),
-            "partition": os.environ.get("SLURM_JOB_PARTITION"),
-            "node_list": os.environ.get("SLURM_JOB_NODELIST"),
-            "submit_dir": os.environ.get("SLURM_SUBMIT_DIR"),
+        'python_version': sys.version,
+        'python_executable': sys.executable,
+        'platform': platform.platform(),
+        'git_commit': _run_command(['git', 'rev-parse', 'HEAD']),
+        'git_dirty': bool(git_status),
+        'git_status_short': git_status or '',
+        'slurm': {
+            'job_id': os.environ.get('SLURM_JOB_ID'),
+            'job_name': os.environ.get('SLURM_JOB_NAME'),
+            'partition': os.environ.get('SLURM_JOB_PARTITION'),
+            'node_list': os.environ.get('SLURM_JOB_NODELIST'),
+            'submit_dir': os.environ.get('SLURM_SUBMIT_DIR'),
         },
     }
     if torch is not None:
-        metadata["torch_version"] = torch.__version__
-        metadata["cuda_available"] = torch.cuda.is_available()
-        metadata["cuda_device_count"] = torch.cuda.device_count()
-        metadata["cuda_version"] = torch.version.cuda
-        metadata["cudnn_version"] = torch.backends.cudnn.version()
-        metadata["cuda_device_name"] = (
-            torch.cuda.get_device_name(0) if device == "cuda" and torch.cuda.is_available() else None
+        metadata['torch_version'] = torch.__version__
+        metadata['cuda_available'] = torch.cuda.is_available()
+        metadata['cuda_device_count'] = torch.cuda.device_count()
+        metadata['cuda_version'] = torch.version.cuda
+        metadata['cudnn_version'] = torch.backends.cudnn.version()
+        metadata['cuda_device_name'] = (
+            torch.cuda.get_device_name(0) if device == 'cuda' and torch.cuda.is_available() else None
         )
     try:
         import torch_geometric
     except ModuleNotFoundError:
-        metadata["torch_geometric_version"] = None
+        metadata['torch_geometric_version'] = None
     else:
-        metadata["torch_geometric_version"] = torch_geometric.__version__
+        metadata['torch_geometric_version'] = torch_geometric.__version__
     return metadata
+
+
+def _copy_hdf5_to_local_scratch(hdf5_path: str | Path, dataset_cfg: dict[str, Any]) -> Path:
+    source = Path(hdf5_path)
+    if not bool(dataset_cfg.get('local_copy', False)):
+        return source
+
+    configured_root = dataset_cfg.get('local_copy_dir')
+    scratch_root = configured_root or os.environ.get('SLURM_TMPDIR') or os.environ.get('TMPDIR')
+    if scratch_root is None:
+        user = os.environ.get('USER', 'unknown')
+        job_id = os.environ.get('SLURM_JOB_ID', 'manual')
+        scratch_root = f'/tmp/{user}/gnn-excited-{job_id}'
+    scratch_root = os.path.expandvars(str(scratch_root))
+    target_dir = Path(scratch_root) / 'gnn_excited_data'
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source.name
+
+    if target.exists() and target.stat().st_size == source.stat().st_size:
+        print(f'Using existing local HDF5 copy: {target}', flush=True)
+        return target
+
+    tmp_target = target.with_name(target.name + '.tmp')
+    if tmp_target.exists():
+        tmp_target.unlink()
+    print(f'Copying HDF5 to local scratch: {source} -> {target}', flush=True)
+    copy_started = time.perf_counter()
+    shutil.copy2(source, tmp_target)
+    tmp_target.replace(target)
+    copy_seconds = time.perf_counter() - copy_started
+    print(f'Finished local HDF5 copy in {copy_seconds:.1f}s', flush=True)
+    return target
+
+
+def _dataloader_kwargs(train_cfg: dict[str, Any], device: str) -> dict[str, Any]:
+    dataloader_cfg = train_cfg.get('dataloader') or {}
+    num_workers = int(dataloader_cfg.get('num_workers', 0))
+    kwargs: dict[str, Any] = {
+        'num_workers': num_workers,
+        'pin_memory': bool(dataloader_cfg.get('pin_memory', device == 'cuda')),
+    }
+    if num_workers > 0:
+        kwargs['persistent_workers'] = bool(dataloader_cfg.get('persistent_workers', True))
+        if 'prefetch_factor' in dataloader_cfg:
+            kwargs['prefetch_factor'] = int(dataloader_cfg['prefetch_factor'])
+    return kwargs
+
+
+def _make_loader(dataset, train_cfg: dict[str, Any], device: str, shuffle: bool):
+    return DataLoader(
+        dataset,
+        batch_size=int(train_cfg['batch_size']),
+        shuffle=shuffle,
+        **_dataloader_kwargs(train_cfg, device),
+    )
 
 
 def write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
@@ -116,7 +191,7 @@ def write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
         for key in record:
             if key not in fieldnames:
                 fieldnames.append(key)
-    with output_path.open("w", newline="", encoding="utf-8") as stream:
+    with output_path.open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
@@ -125,39 +200,39 @@ def write_history_csv(path: str | Path, history: list[dict[str, Any]]) -> None:
 def write_summary_json(path: str | Path, payload: dict[str, Any]) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as stream:
+    with output_path.open('w', encoding='utf-8') as stream:
         json.dump(_json_ready(payload), stream, indent=2, sort_keys=True)
-        stream.write("\n")
+        stream.write('\n')
 
 
 class WandbRun:
     def __init__(self, config: dict[str, Any], run_summary: dict[str, Any]) -> None:
         self._run = None
         self._wandb = None
-        wandb_cfg = config.get("wandb") or {}
-        if not wandb_cfg.get("enabled", False):
+        wandb_cfg = config.get('wandb') or {}
+        if not wandb_cfg.get('enabled', False):
             return
         try:
             import wandb
         except ModuleNotFoundError as exc:
-            raise RuntimeError("Config enabled W&B logging, but wandb is not installed.") from exc
+            raise RuntimeError('Config enabled W&B logging, but wandb is not installed.') from exc
 
         self._wandb = wandb
         init_kwargs = {
-            "project": wandb_cfg.get("project", "gnn-excited"),
-            "entity": wandb_cfg.get("entity"),
-            "name": wandb_cfg.get("name"),
-            "group": wandb_cfg.get("group"),
-            "tags": wandb_cfg.get("tags"),
-            "mode": wandb_cfg.get("mode"),
-            "job_type": wandb_cfg.get("job_type", "train"),
-            "config": _json_ready(
+            'project': wandb_cfg.get('project', 'gnn-excited'),
+            'entity': wandb_cfg.get('entity'),
+            'name': wandb_cfg.get('name'),
+            'group': wandb_cfg.get('group'),
+            'tags': wandb_cfg.get('tags'),
+            'mode': wandb_cfg.get('mode'),
+            'job_type': wandb_cfg.get('job_type', 'train'),
+            'config': _json_ready(
                 {
-                    "config": config,
-                    "run_summary": {
+                    'config': config,
+                    'run_summary': {
                         key: value
                         for key, value in run_summary.items()
-                        if key not in {"latest_metrics", "test_metrics"}
+                        if key not in {'latest_metrics', 'test_metrics'}
                     },
                 }
             ),
@@ -171,20 +246,25 @@ class WandbRun:
     def metadata(self) -> dict[str, str] | None:
         if self._run is None:
             return None
-        return {"id": self._run.id, "name": self._run.name, "url": self._run.url}
+        return {'id': self._run.id, 'name': self._run.name, 'url': self._run.url}
 
     def log_epoch(self, record: dict[str, Any]) -> None:
         if self._wandb is None:
             return
-        self._wandb.log(record, step=int(record["epoch"]))
+        self._wandb.log(record, step=int(record['epoch']))
 
     def log_test_metrics(self, metrics: dict[str, float], best_epoch: int | None) -> None:
         if self._wandb is None:
             return
-        payload = {f"test_{key}": value for key, value in metrics.items()}
+        payload = {f'test_{key}': value for key, value in metrics.items()}
         if best_epoch is not None:
-            payload["best_epoch"] = best_epoch
+            payload['best_epoch'] = best_epoch
         self._wandb.log(payload)
+
+    def log_metrics(self, metrics: dict[str, float]) -> None:
+        if self._wandb is None:
+            return
+        self._wandb.log(metrics)
 
     def finish(self) -> None:
         if self._wandb is not None:
@@ -195,13 +275,13 @@ def batch_mae(pred, target) -> dict[str, float]:
     energy_mae = (pred[:, 0] - target[:, 0]).abs().mean().item()
     log_f_mae = (pred[:, 1] - target[:, 1]).abs().mean().item()
     f_mae = (torch.expm1(pred[:, 1]).clamp_min(0) - torch.expm1(target[:, 1])).abs().mean().item()
-    return {"S1_eV_mae": energy_mae, "log1p_S1_f_mae": log_f_mae, "S1_f_mae": f_mae}
+    return {'S1_eV_mae': energy_mae, 'log1p_S1_f_mae': log_f_mae, 'S1_f_mae': f_mae}
 
 
 def evaluate(model, loader, device: str) -> dict[str, float]:
     model.eval()
-    totals = {"loss": 0.0, "S1_eV_mae": 0.0, "log1p_S1_f_mae": 0.0, "S1_f_mae": 0.0, "n": 0}
-    loss_fn = torch.nn.MSELoss(reduction="mean")
+    totals = {'loss': 0.0, 'S1_eV_mae': 0.0, 'log1p_S1_f_mae': 0.0, 'S1_f_mae': 0.0, 'n': 0}
+    loss_fn = torch.nn.MSELoss(reduction='mean')
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
@@ -210,130 +290,139 @@ def evaluate(model, loader, device: str) -> dict[str, float]:
             loss = loss_fn(pred, target)
             metrics = batch_mae(pred, target)
             batch_n = target.shape[0]
-            totals["loss"] += loss.item() * batch_n
+            totals['loss'] += loss.item() * batch_n
             for key, value in metrics.items():
                 totals[key] += value * batch_n
-            totals["n"] += batch_n
-    n = max(totals.pop("n"), 1)
+            totals['n'] += batch_n
+    n = max(totals.pop('n'), 1)
     return {key: value / n for key, value in totals.items()}
 
 
 def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None):
     if not scheduler_cfg:
         return None
-    scheduler_type = scheduler_cfg.get("type")
-    if scheduler_type in (None, "none"):
+    scheduler_type = scheduler_cfg.get('type')
+    if scheduler_type in (None, 'none'):
         return None
-    if scheduler_type != "reduce_on_plateau":
-        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+    if scheduler_type != 'reduce_on_plateau':
+        raise ValueError(f'Unsupported scheduler type: {scheduler_type}')
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode=str(scheduler_cfg.get("mode", "min")),
-        factor=float(scheduler_cfg.get("factor", 0.5)),
-        patience=int(scheduler_cfg.get("patience", 8)),
-        min_lr=float(scheduler_cfg.get("min_lr", 1e-6)),
+        mode=str(scheduler_cfg.get('mode', 'min')),
+        factor=float(scheduler_cfg.get('factor', 0.5)),
+        patience=int(scheduler_cfg.get('patience', 8)),
+        min_lr=float(scheduler_cfg.get('min_lr', 1e-6)),
     )
 
 
 def _current_lr(optimizer) -> float:
-    return float(optimizer.param_groups[0]["lr"])
+    return float(optimizer.param_groups[0]['lr'])
 
 
 def classify_validation_improvement(val_loss: float, best_val: float, early_stopping_best_val: float, min_delta: float):
-    """Separate checkpoint-saving improvement from early-stopping improvement."""
+    '''Separate checkpoint-saving improvement from early-stopping improvement.'''
     return {
-        "checkpoint_improved": val_loss < best_val,
-        "early_stopping_improved": val_loss < early_stopping_best_val - min_delta,
+        'checkpoint_improved': val_loss < best_val,
+        'early_stopping_improved': val_loss < early_stopping_best_val - min_delta,
     }
 
 
 def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if _IMPORT_ERROR is not None:
-        raise ModuleNotFoundError("Training requires torch and torch_geometric.") from _IMPORT_ERROR
+        raise ModuleNotFoundError('Training requires torch and torch_geometric.') from _IMPORT_ERROR
 
     config_path = Path(config_path)
     config = load_config(config_path)
-    dataset_cfg = config["dataset"]
-    train_cfg = config["training"]
-    model_kwargs = dict(config["model"])
-    device = train_cfg.get("device", "cpu")
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("Config requested CUDA, but torch.cuda.is_available() is False")
+    dataset_cfg = config['dataset']
+    train_cfg = config['training']
+    model_kwargs = dict(config['model'])
+    device = train_cfg.get('device', 'cpu')
+    if device == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('Config requested CUDA, but torch.cuda.is_available() is False')
 
-    checkpoint_path = Path(train_cfg["checkpoint_path"])
+    checkpoint_path = Path(train_cfg['checkpoint_path'])
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    metrics_csv_path = Path(train_cfg.get("metrics_csv_path") or _default_metrics_csv_path(checkpoint_path))
-    summary_json_path = Path(train_cfg.get("summary_json_path") or _default_summary_json_path(checkpoint_path))
+    metrics_csv_path = Path(train_cfg.get('metrics_csv_path') or _default_metrics_csv_path(checkpoint_path))
+    summary_json_path = Path(train_cfg.get('summary_json_path') or _default_summary_json_path(checkpoint_path))
 
-    rows = _load_manifest_rows(dataset_cfg["manifest_path"])
+    effective_hdf5_path = _copy_hdf5_to_local_scratch(dataset_cfg['hdf5_path'], dataset_cfg)
+    rows = _load_manifest_rows(dataset_cfg['manifest_path'])
     manifest_ok_rows = len(rows)
-    max_rows = dataset_cfg.get("max_manifest_molecules")
+    max_rows = dataset_cfg.get('max_manifest_molecules')
     if max_rows is not None:
         rows = rows[: int(max_rows)]
     train_idx, val_idx, test_idx = deterministic_split(
         rows,
-        seed=int(dataset_cfg["split_seed"]),
-        train_fraction=float(dataset_cfg["train_fraction"]),
-        val_fraction=float(dataset_cfg["val_fraction"]),
+        seed=int(dataset_cfg['split_seed']),
+        train_fraction=float(dataset_cfg['train_fraction']),
+        val_fraction=float(dataset_cfg['val_fraction']),
     )
-    train_ds = QCDGES1Dataset(dataset_cfg["hdf5_path"], dataset_cfg["manifest_path"], _subset_keys(rows, train_idx))
-    val_ds = QCDGES1Dataset(dataset_cfg["hdf5_path"], dataset_cfg["manifest_path"], _subset_keys(rows, val_idx))
-    test_ds = QCDGES1Dataset(dataset_cfg["hdf5_path"], dataset_cfg["manifest_path"], _subset_keys(rows, test_idx))
+    test_subset_key_groups = _subset_key_groups(rows, test_idx)
+    train_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx))
+    val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx))
+    test_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx))
 
-    train_loader = DataLoader(train_ds, batch_size=int(train_cfg["batch_size"]), shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=int(train_cfg["batch_size"]), shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=int(train_cfg["batch_size"]), shuffle=False)
+    train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True)
+    val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False)
+    test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False)
 
     model = build_dimenetpp(**model_kwargs).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=float(train_cfg["learning_rate"]),
-        weight_decay=float(train_cfg.get("weight_decay", 0.0)),
+        lr=float(train_cfg['learning_rate']),
+        weight_decay=float(train_cfg.get('weight_decay', 0.0)),
     )
-    scheduler = build_scheduler(optimizer, train_cfg.get("scheduler"))
+    scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'))
     loss_fn = torch.nn.MSELoss()
     history: list[dict[str, Any]] = []
     best_val = math.inf
     best_epoch: int | None = None
     early_stopping_best_val = math.inf
-    min_delta = float(train_cfg.get("early_stopping_min_delta", 0.0))
-    early_stopping_patience = train_cfg.get("early_stopping_patience")
+    min_delta = float(train_cfg.get('early_stopping_min_delta', 0.0))
+    early_stopping_patience = train_cfg.get('early_stopping_patience')
     early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
-    max_grad_norm = float(train_cfg.get("max_grad_norm", 0.0))
+    max_grad_norm = float(train_cfg.get('max_grad_norm', 0.0))
     epochs_without_improvement = 0
     stopped_early = False
     stop_reason = None
     started_at = _utc_now()
+    dataloader_cfg = _dataloader_kwargs(train_cfg, device)
     run_summary: dict[str, Any] = {
-        "status": "running",
-        "started_at": started_at,
-        "updated_at": started_at,
-        "config_path": str(config_path),
-        "checkpoint_path": str(checkpoint_path),
-        "metrics_csv_path": str(metrics_csv_path),
-        "summary_json_path": str(summary_json_path),
-        "device": device,
-        "environment": collect_run_metadata(device),
-        "manifest_ok_rows": manifest_ok_rows,
-        "dataset_rows_used": len(rows),
-        "split_sizes": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
-        "config": config,
-        "best_epoch": None,
-        "best_val_loss": None,
-        "latest_epoch": 0,
-        "latest_metrics": None,
-        "test_metrics": None,
-        "stopped_early": False,
-        "stop_reason": None,
+        'status': 'running',
+        'started_at': started_at,
+        'updated_at': started_at,
+        'config_path': str(config_path),
+        'checkpoint_path': str(checkpoint_path),
+        'metrics_csv_path': str(metrics_csv_path),
+        'summary_json_path': str(summary_json_path),
+        'device': device,
+        'environment': collect_run_metadata(device),
+        'manifest_ok_rows': manifest_ok_rows,
+        'dataset_rows_used': len(rows),
+        'hdf5_path': str(dataset_cfg['hdf5_path']),
+        'effective_hdf5_path': str(effective_hdf5_path),
+        'dataloader': dataloader_cfg,
+        'split_sizes': {'train': len(train_ds), 'val': len(val_ds), 'test': len(test_ds)},
+        'test_subset_sizes': {subset: len(keys) for subset, keys in test_subset_key_groups.items()},
+        'config': config,
+        'best_epoch': None,
+        'best_val_loss': None,
+        'latest_epoch': 0,
+        'latest_metrics': None,
+        'test_metrics': None,
+        'stopped_early': False,
+        'stop_reason': None,
     }
     write_summary_json(summary_json_path, run_summary)
     wandb_run = WandbRun(config, run_summary)
     if wandb_run.enabled:
-        run_summary["wandb"] = wandb_run.metadata()
+        run_summary['wandb'] = wandb_run.metadata()
         write_summary_json(summary_json_path, run_summary)
 
     try:
-        for epoch in range(1, int(train_cfg["epochs"]) + 1):
+        for epoch in range(1, int(train_cfg['epochs']) + 1):
+            epoch_started = time.perf_counter()
+            train_started = time.perf_counter()
             model.train()
             total_loss = 0.0
             total_n = 0
@@ -350,16 +439,25 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 batch_n = target.shape[0]
                 total_loss += loss.item() * batch_n
                 total_n += batch_n
+            train_seconds = time.perf_counter() - train_started
 
-            val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {"loss": float("nan")}
-            val_loss = val_metrics.get("loss", math.inf)
+            val_started = time.perf_counter()
+            val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {'loss': float('nan')}
+            val_seconds = time.perf_counter() - val_started
+            epoch_seconds = time.perf_counter() - epoch_started
+            val_loss = val_metrics.get('loss', math.inf)
             if scheduler is not None and math.isfinite(val_loss):
                 scheduler.step(val_loss)
             record = {
-                "epoch": epoch,
-                "train_loss": total_loss / max(total_n, 1),
-                "learning_rate": _current_lr(optimizer),
-                **{f"val_{key}": value for key, value in val_metrics.items()},
+                'epoch': epoch,
+                'train_loss': total_loss / max(total_n, 1),
+                'learning_rate': _current_lr(optimizer),
+                'epoch_seconds': epoch_seconds,
+                'train_seconds': train_seconds,
+                'val_seconds': val_seconds,
+                'train_samples_per_second': total_n / max(train_seconds, 1e-9),
+                'val_samples_per_second': len(val_ds) / max(val_seconds, 1e-9) if len(val_ds) else 0.0,
+                **{f'val_{key}': value for key, value in val_metrics.items()},
             }
             history.append(record)
             print(record, flush=True)
@@ -367,46 +465,46 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             wandb_run.log_epoch(record)
 
             improvement = classify_validation_improvement(val_loss, best_val, early_stopping_best_val, min_delta)
-            if improvement["checkpoint_improved"]:
+            if improvement['checkpoint_improved']:
                 best_val = val_loss
                 best_epoch = epoch
                 torch.save(
                     {
-                        "model_state_dict": model.state_dict(),
-                        "model_kwargs": model_kwargs,
-                        "config": config,
-                        "history": history,
+                        'model_state_dict': model.state_dict(),
+                        'model_kwargs': model_kwargs,
+                        'config': config,
+                        'history': history,
                     },
                     checkpoint_path,
                 )
 
-            if improvement["early_stopping_improved"]:
+            if improvement['early_stopping_improved']:
                 early_stopping_best_val = val_loss
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
             run_summary.update(
                 {
-                    "updated_at": _utc_now(),
-                    "best_epoch": best_epoch,
-                    "best_val_loss": best_val if math.isfinite(best_val) else None,
-                    "latest_epoch": epoch,
-                    "latest_metrics": record,
-                    "stopped_early": stopped_early,
-                    "stop_reason": stop_reason,
+                    'updated_at': _utc_now(),
+                    'best_epoch': best_epoch,
+                    'best_val_loss': best_val if math.isfinite(best_val) else None,
+                    'latest_epoch': epoch,
+                    'latest_metrics': record,
+                    'stopped_early': stopped_early,
+                    'stop_reason': stop_reason,
                 }
             )
             write_summary_json(summary_json_path, run_summary)
 
             if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
                 stopped_early = True
-                stop_reason = f"validation loss did not improve for {early_stopping_patience} epochs"
+                stop_reason = f'validation loss did not improve for {early_stopping_patience} epochs'
                 run_summary.update(
                     {
-                        "status": "stopped_early",
-                        "updated_at": _utc_now(),
-                        "stopped_early": stopped_early,
-                        "stop_reason": stop_reason,
+                        'status': 'stopped_early',
+                        'updated_at': _utc_now(),
+                        'stopped_early': stopped_early,
+                        'stop_reason': stop_reason,
                     }
                 )
                 write_summary_json(summary_json_path, run_summary)
@@ -414,27 +512,41 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
 
         if best_epoch is not None and checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path, map_location=device)
-            model.load_state_dict(checkpoint["model_state_dict"])
+            model.load_state_dict(checkpoint['model_state_dict'])
 
         test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
+        per_subset_test_metrics: dict[str, dict[str, float]] = {}
+        if bool(dataset_cfg.get('report_subset_metrics', False)):
+            for subset_name, subset_keys in test_subset_key_groups.items():
+                subset_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], subset_keys)
+                subset_loader = _make_loader(subset_ds, train_cfg, device, shuffle=False)
+                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
+        if wandb_run.enabled and per_subset_test_metrics:
+            flat_subset_metrics = {
+                f'test_subset/{subset_name}/{metric_name}': metric_value
+                for subset_name, metrics in per_subset_test_metrics.items()
+                for metric_name, metric_value in metrics.items()
+            }
+            wandb_run.log_metrics(flat_subset_metrics)
         run_summary.update(
             {
-                "status": "completed",
-                "completed_at": _utc_now(),
-                "updated_at": _utc_now(),
-                "stopped_early": stopped_early,
-                "stop_reason": stop_reason,
-                "test_metrics": test_metrics,
+                'status': 'completed',
+                'completed_at': _utc_now(),
+                'updated_at': _utc_now(),
+                'stopped_early': stopped_early,
+                'stop_reason': stop_reason,
+                'test_metrics': test_metrics,
+                'per_subset_test_metrics': per_subset_test_metrics,
             }
         )
         write_summary_json(summary_json_path, run_summary)
         return {
-            "history": history,
-            "test_metrics": test_metrics,
-            "checkpoint_path": str(checkpoint_path),
-            "metrics_csv_path": str(metrics_csv_path),
-            "summary_json_path": str(summary_json_path),
+            'history': history,
+            'test_metrics': test_metrics,
+            'checkpoint_path': str(checkpoint_path),
+            'metrics_csv_path': str(metrics_csv_path),
+            'summary_json_path': str(summary_json_path),
         }
     finally:
         wandb_run.finish()

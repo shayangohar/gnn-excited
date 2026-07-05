@@ -1,0 +1,55 @@
+model:
+  cutoff: 5
+  num_blocks: 4
+  hidden_channels: 128
+  out_emb_channels: 256
+  int_emb_size: 64
+  basis_emb_size: 16
+  num_radial: 6
+  num_spherical: 3
+  max_num_neighbors: 32
+  out_channels: 2
+
+dataset:
+  hdf5_path: data/A_9.hdf5
+  manifest_path: data/processed/a9_manifest_full.csv
+  max_manifest_molecules:
+  split_seed: 17
+  train_fraction: 0.8
+  val_fraction: 0.1
+
+targets:
+  energy: S1_eV
+  oscillator: log1p_S1_f
+
+training:
+  device: cuda
+  epochs: 200
+  batch_size: 64
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  max_grad_norm: 1.0
+  scheduler:
+    type: reduce_on_plateau
+    mode: min
+    factor: 0.5
+    patience: 8
+    min_lr: 0.000001
+  early_stopping_patience: 40
+  early_stopping_min_delta: 0.00001
+  checkpoint_path: checkpoints/dimenetpp_a9_full_wide_clip_esdiag.pt
+  metrics_csv_path: runs/dimenetpp_a9_full_wide_clip_esdiag.metrics.csv
+  summary_json_path: runs/dimenetpp_a9_full_wide_clip_esdiag.summary.json
+
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: dimenetpp_a9_full_wide_clip_esdiag
+  group: a9-wide-clip-diagnostics
+  tags:
+    - A_9
+    - full
+    - wide
+    - gradient-clipping
+    - early-stopping-diagnostic
