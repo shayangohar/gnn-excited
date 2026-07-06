@@ -238,9 +238,7 @@ class WandbRun:
             'job_type': wandb_cfg.get('job_type', 'train'),
             'config': _json_ready(
                 {
-                    'target_columns': list(target_columns),
-        'target_dim': len(target_columns),
-        'config': config,
+                    'config': config,
                     'run_summary': {
                         key: value
                         for key, value in run_summary.items()
@@ -448,6 +446,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'dataloader': dataloader_cfg,
         'split_sizes': {'train': len(train_ds), 'val': len(val_ds), 'test': len(test_ds)},
         'test_subset_sizes': {subset: len(keys) for subset, keys in test_subset_key_groups.items()},
+        'target_columns': list(target_columns),
+        'target_dim': len(target_columns),
         'config': config,
         'best_epoch': None,
         'best_val_loss': None,
