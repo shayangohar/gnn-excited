@@ -43,6 +43,16 @@ def _subset_keys(rows: list[dict[str, str]], indices: list[int]) -> list[str]:
     return [rows[i]['molecule_key'] for i in indices]
 
 
+def _target_columns_from_config(config: dict[str, Any]) -> tuple[str, ...]:
+    targets_cfg = config.get('targets') or {}
+    columns = targets_cfg.get('columns')
+    if columns:
+        return tuple(str(column) for column in columns)
+    energy = targets_cfg.get('energy', 'S1_eV')
+    oscillator = targets_cfg.get('oscillator', 'log1p_S1_f')
+    return (str(energy), str(oscillator))
+
+
 def _source_subset_from_key(molecule_key: str) -> str:
     prefix = ''.join(ch for ch in str(molecule_key) if ch.isalpha())
     return {
@@ -228,7 +238,9 @@ class WandbRun:
             'job_type': wandb_cfg.get('job_type', 'train'),
             'config': _json_ready(
                 {
-                    'config': config,
+                    'target_columns': list(target_columns),
+        'target_dim': len(target_columns),
+        'config': config,
                     'run_summary': {
                         key: value
                         for key, value in run_summary.items()
@@ -271,28 +283,53 @@ class WandbRun:
             self._wandb.finish()
 
 
-def batch_mae(pred, target) -> dict[str, float]:
-    energy_mae = (pred[:, 0] - target[:, 0]).abs().mean().item()
-    log_f_mae = (pred[:, 1] - target[:, 1]).abs().mean().item()
-    f_mae = (torch.expm1(pred[:, 1]).clamp_min(0) - torch.expm1(target[:, 1])).abs().mean().item()
-    return {'S1_eV_mae': energy_mae, 'log1p_S1_f_mae': log_f_mae, 'S1_f_mae': f_mae}
+def _physical_oscillator_column(column: str) -> str | None:
+    if column.startswith('log1p_') and column.endswith('_f'):
+        return column.removeprefix('log1p_')
+    return None
 
 
-def evaluate(model, loader, device: str) -> dict[str, float]:
+def batch_mae(pred, target, target_columns: tuple[str, ...]) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    energy_maes: list[float] = []
+    log_osc_maes: list[float] = []
+    osc_maes: list[float] = []
+    for idx, column in enumerate(target_columns):
+        mae = (pred[:, idx] - target[:, idx]).abs().mean().item()
+        metrics[f'{column}_mae'] = mae
+        if column.endswith('_eV'):
+            energy_maes.append(mae)
+        physical_osc_column = _physical_oscillator_column(column)
+        if physical_osc_column is not None:
+            osc_mae = (torch.expm1(pred[:, idx]).clamp_min(0) - torch.expm1(target[:, idx])).abs().mean().item()
+            metrics[f'{physical_osc_column}_mae'] = osc_mae
+            log_osc_maes.append(mae)
+            osc_maes.append(osc_mae)
+    if energy_maes:
+        metrics['energy_eV_mae'] = sum(energy_maes) / len(energy_maes)
+    if log_osc_maes:
+        metrics['log1p_oscillator_strength_mae'] = sum(log_osc_maes) / len(log_osc_maes)
+    if osc_maes:
+        metrics['oscillator_strength_mae'] = sum(osc_maes) / len(osc_maes)
+    return metrics
+
+
+def evaluate(model, loader, device: str, target_columns: tuple[str, ...]) -> dict[str, float]:
     model.eval()
-    totals = {'loss': 0.0, 'S1_eV_mae': 0.0, 'log1p_S1_f_mae': 0.0, 'S1_f_mae': 0.0, 'n': 0}
+    totals: dict[str, float] = {'loss': 0.0, 'n': 0}
     loss_fn = torch.nn.MSELoss(reduction='mean')
+    target_dim = len(target_columns)
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            target = batch.y.view(-1, 2)
-            pred = model(batch.z, batch.pos, batch.batch).view(-1, 2)
+            target = batch.y.view(-1, target_dim)
+            pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
             loss = loss_fn(pred, target)
-            metrics = batch_mae(pred, target)
+            metrics = batch_mae(pred, target, target_columns)
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
             for key, value in metrics.items():
-                totals[key] += value * batch_n
+                totals[key] = totals.get(key, 0.0) + value * batch_n
             totals['n'] += batch_n
     n = max(totals.pop('n'), 1)
     return {key: value / n for key, value in totals.items()}
@@ -336,6 +373,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     dataset_cfg = config['dataset']
     train_cfg = config['training']
     model_kwargs = dict(config['model'])
+    target_columns = _target_columns_from_config(config)
+    configured_out_channels = int(model_kwargs.get('out_channels', len(target_columns)))
+    if configured_out_channels != len(target_columns):
+        raise ValueError(
+            'model.out_channels={} does not match {} targets'.format(configured_out_channels, len(target_columns))
+        )
+    model_kwargs['out_channels'] = len(target_columns)
     device = train_cfg.get('device', 'cpu')
     if device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('Config requested CUDA, but torch.cuda.is_available() is False')
@@ -358,9 +402,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         val_fraction=float(dataset_cfg['val_fraction']),
     )
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
-    train_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx))
-    val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx))
-    test_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx))
+    train_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx), target_columns)
+    val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
+    test_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx), target_columns)
 
     train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True)
     val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False)
@@ -428,8 +472,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             total_n = 0
             for batch in train_loader:
                 batch = batch.to(device)
-                target = batch.y.view(-1, 2)
-                pred = model(batch.z, batch.pos, batch.batch).view(-1, 2)
+                target = batch.y.view(-1, len(target_columns))
+                pred = model(batch.z, batch.pos, batch.batch).view(-1, len(target_columns))
                 loss = loss_fn(pred, target)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -442,7 +486,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             train_seconds = time.perf_counter() - train_started
 
             val_started = time.perf_counter()
-            val_metrics = evaluate(model, val_loader, device) if len(val_ds) else {'loss': float('nan')}
+            val_metrics = evaluate(model, val_loader, device, target_columns) if len(val_ds) else {'loss': float('nan')}
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
@@ -514,13 +558,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             checkpoint = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
 
-        test_metrics = evaluate(model, test_loader, device) if len(test_ds) else {}
+        test_metrics = evaluate(model, test_loader, device, target_columns) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
             for subset_name, subset_keys in test_subset_key_groups.items():
-                subset_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], subset_keys)
+                subset_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], subset_keys, target_columns)
                 subset_loader = _make_loader(subset_ds, train_cfg, device, shuffle=False)
-                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device)
+                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
         if wandb_run.enabled and per_subset_test_metrics:
             flat_subset_metrics = {

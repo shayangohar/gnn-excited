@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import math
 from pathlib import Path
 from typing import Sequence
 
@@ -19,18 +18,29 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in environmen
 else:
     _IMPORT_ERROR = None
 
+DEFAULT_TARGET_COLUMNS = ('S1_eV', 'log1p_S1_f')
+
 
 class QCDGES1Dataset(Dataset):
-    '''PyG dataset for QCDGE S1 energy and oscillator-strength targets.'''
+    '''PyG dataset for QCDGE excited-state targets.'''
 
-    def __init__(self, hdf5_path: str | Path, manifest_path: str | Path, molecule_keys: Sequence[str] | None = None):
+    def __init__(
+        self,
+        hdf5_path: str | Path,
+        manifest_path: str | Path,
+        molecule_keys: Sequence[str] | None = None,
+        target_columns: Sequence[str] | None = None,
+    ):
         if _IMPORT_ERROR is not None:
             raise ModuleNotFoundError(
                 'QCDGES1Dataset requires torch and torch_geometric. Install the ML environment first.'
             ) from _IMPORT_ERROR
         super().__init__()
         self.hdf5_path = Path(hdf5_path)
-        self.rows = self._load_rows(Path(manifest_path), molecule_keys)
+        self.target_columns = tuple(target_columns or DEFAULT_TARGET_COLUMNS)
+        if not self.target_columns:
+            raise ValueError('At least one target column is required')
+        self.rows = self._load_rows(Path(manifest_path), molecule_keys, self.target_columns)
         self._hdf5_handle: h5py.File | None = None
 
     def __getstate__(self):
@@ -47,11 +57,19 @@ class QCDGES1Dataset(Dataset):
                 pass
 
     @staticmethod
-    def _load_rows(manifest_path: Path, molecule_keys: Sequence[str] | None) -> list[dict[str, str]]:
+    def _load_rows(
+        manifest_path: Path,
+        molecule_keys: Sequence[str] | None,
+        target_columns: Sequence[str],
+    ) -> list[dict[str, str]]:
         allowed = set(molecule_keys) if molecule_keys is not None else None
         rows: list[dict[str, str]] = []
         with manifest_path.open('r', newline='', encoding='utf-8') as stream:
-            for row in csv.DictReader(stream):
+            reader = csv.DictReader(stream)
+            missing = [column for column in target_columns if column not in (reader.fieldnames or [])]
+            if missing:
+                raise ValueError(f'Manifest {manifest_path} is missing target columns: {missing}')
+            for row in reader:
                 if row.get('status') != 'ok':
                     continue
                 if allowed is not None and row['molecule_key'] not in allowed:
@@ -82,10 +100,8 @@ class QCDGES1Dataset(Dataset):
     def get(self, idx: int):
         row = self.rows[idx]
         z_np, pos_np = self._read_molecule_arrays(row['molecule_key'])
-        y = torch.tensor(
-            [[float(row['S1_eV']), math.log1p(float(row['S1_f']))]],
-            dtype=torch.float32,
-        )
+        y_values = [float(row[column]) for column in self.target_columns]
+        y = torch.tensor([y_values], dtype=torch.float32)
         return Data(
             z=torch.as_tensor(z_np, dtype=torch.long),
             pos=torch.as_tensor(pos_np, dtype=torch.float32),

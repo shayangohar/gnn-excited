@@ -96,3 +96,17 @@ def test_wandb_run_disabled_without_importing_wandb() -> None:
 
     assert run.enabled is False
     assert run.metadata() is None
+
+
+def test_batch_mae_reports_multistate_metrics() -> None:
+    torch = pytest.importorskip('torch')
+    from gnn_excited.train import batch_mae
+
+    pred = torch.tensor([[1.0, 0.0, 3.0, 0.0]])
+    target = torch.tensor([[2.0, 0.0, 1.0, 0.0]])
+    metrics = batch_mae(pred, target, ('S1_eV', 'log1p_S1_f', 'S2_eV', 'log1p_S2_f'))
+
+    assert metrics['S1_eV_mae'] == pytest.approx(1.0)
+    assert metrics['S2_eV_mae'] == pytest.approx(2.0)
+    assert metrics['energy_eV_mae'] == pytest.approx(1.5)
+    assert metrics['oscillator_strength_mae'] == pytest.approx(0.0)
