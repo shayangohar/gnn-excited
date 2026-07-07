@@ -10,7 +10,7 @@
 #SBATCH --mem=128G
 #SBATCH --account=csn100
 #SBATCH --no-requeue
-#SBATCH --time=72:00:00
+#SBATCH --time=48:00:00
 #SBATCH --mail-user=shayangohar@mail.fresnostate.edu
 #SBATCH --mail-type=END,FAIL
 
