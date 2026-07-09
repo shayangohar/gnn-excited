@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
@@ -8,9 +8,11 @@ import pytest
 
 from gnn_excited.train import (
     WandbRun,
+    build_loss_weights,
     build_scheduler,
     classify_validation_improvement,
     collect_run_metadata,
+    weighted_mse_loss,
     write_history_csv,
     write_summary_json,
 )
@@ -110,3 +112,40 @@ def test_batch_mae_reports_multistate_metrics() -> None:
     assert metrics['S2_eV_mae'] == pytest.approx(2.0)
     assert metrics['energy_eV_mae'] == pytest.approx(1.5)
     assert metrics['oscillator_strength_mae'] == pytest.approx(0.0)
+
+
+def test_build_loss_weights_supports_energy_oscillator_defaults() -> None:
+    config = {
+        'loss': {
+            'type': 'weighted_mse',
+            'energy_weight': 1.5,
+            'oscillator_weight': 1.0,
+        }
+    }
+
+    weights = build_loss_weights(config, ('S1_eV', 'log1p_S1_f', 'S2_eV', 'log1p_S2_f'))
+
+    assert weights == pytest.approx((1.5, 1.0, 1.5, 1.0))
+
+
+def test_build_loss_weights_allows_per_column_overrides() -> None:
+    config = {
+        'loss': {
+            'type': 'weighted_mse',
+            'energy_weight': 1.5,
+            'oscillator_weight': 1.0,
+            'weights': {'S1_eV': 2.0},
+        }
+    }
+
+    weights = build_loss_weights(config, ('S1_eV', 'log1p_S1_f', 'S2_eV', 'log1p_S2_f'))
+
+    assert weights == pytest.approx((2.0, 1.0, 1.5, 1.0))
+
+
+def test_weighted_mse_loss_normalizes_by_weight_sum() -> None:
+    torch = pytest.importorskip('torch')
+    pred = torch.tensor([[1.0, 0.0]])
+    target = torch.tensor([[0.0, 0.0]])
+
+    assert weighted_mse_loss(pred, target, (3.0, 1.0)).item() == pytest.approx(0.75)

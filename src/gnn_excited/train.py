@@ -53,6 +53,68 @@ def _target_columns_from_config(config: dict[str, Any]) -> tuple[str, ...]:
     return (str(energy), str(oscillator))
 
 
+def build_loss_weights(config: dict[str, Any], target_columns: tuple[str, ...]) -> tuple[float, ...] | None:
+    loss_cfg = config.get('loss') or {}
+    if not loss_cfg:
+        return None
+
+    loss_type = str(loss_cfg.get('type', 'mse'))
+    supported_loss_types = {'mse', 'mean_mse', 'weighted_mse'}
+    if loss_type not in supported_loss_types:
+        raise ValueError(f'Unsupported loss type: {loss_type}')
+
+    weights_cfg = loss_cfg.get('weights')
+    if isinstance(weights_cfg, list):
+        if len(weights_cfg) != len(target_columns):
+            raise ValueError('loss.weights list length must match target column count')
+        weights = [float(weight) for weight in weights_cfg]
+    elif weights_cfg is None or isinstance(weights_cfg, dict):
+        energy_weight = float(loss_cfg.get('energy_weight', 1.0))
+        oscillator_weight = float(loss_cfg.get('oscillator_weight', 1.0))
+        weights = []
+        for column in target_columns:
+            if column.endswith('_eV'):
+                weight = energy_weight
+            elif _physical_oscillator_column(column) is not None:
+                weight = oscillator_weight
+            else:
+                weight = 1.0
+            if isinstance(weights_cfg, dict) and column in weights_cfg:
+                weight = float(weights_cfg[column])
+            weights.append(weight)
+    else:
+        raise TypeError('loss.weights must be a mapping, list, or omitted')
+
+    if any(weight <= 0 for weight in weights):
+        raise ValueError('loss weights must be positive')
+
+    if loss_type != 'weighted_mse' and all(math.isclose(weight, 1.0) for weight in weights):
+        return None
+    if loss_type != 'weighted_mse':
+        raise ValueError('non-unit loss weights require loss.type: weighted_mse')
+    return tuple(weights)
+
+
+def _normalize_loss_weights(config: dict[str, Any]) -> bool:
+    loss_cfg = config.get('loss') or {}
+    return bool(loss_cfg.get('normalize', True))
+
+
+def weighted_mse_loss(pred, target, loss_weights=None, normalize: bool = True):
+    if loss_weights is None:
+        return torch.nn.functional.mse_loss(pred, target)
+
+    weights = torch.as_tensor(loss_weights, dtype=pred.dtype, device=pred.device).view(1, -1)
+    if weights.shape[1] != pred.shape[1]:
+        raise ValueError('loss weight count must match prediction dimension')
+
+    squared_error = (pred - target).pow(2) * weights
+    if normalize:
+        denominator = pred.shape[0] * weights.sum().clamp_min(torch.finfo(pred.dtype).eps)
+        return squared_error.sum() / denominator
+    return squared_error.mean()
+
+
 def _source_subset_from_key(molecule_key: str) -> str:
     prefix = ''.join(ch for ch in str(molecule_key) if ch.isalpha())
     return {
@@ -312,26 +374,34 @@ def batch_mae(pred, target, target_columns: tuple[str, ...]) -> dict[str, float]
     return metrics
 
 
-def evaluate(model, loader, device: str, target_columns: tuple[str, ...]) -> dict[str, float]:
+def evaluate(
+    model,
+    loader,
+    device: str,
+    target_columns: tuple[str, ...],
+    loss_weights=None,
+    normalize_loss_weights: bool = True,
+) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {'loss': 0.0, 'n': 0}
-    loss_fn = torch.nn.MSELoss(reduction='mean')
     target_dim = len(target_columns)
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
             target = batch.y.view(-1, target_dim)
             pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
-            loss = loss_fn(pred, target)
+            loss = weighted_mse_loss(pred, target, loss_weights, normalize_loss_weights)
             metrics = batch_mae(pred, target, target_columns)
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
+            if loss_weights is not None:
+                unweighted_loss = weighted_mse_loss(pred, target)
+                totals['unweighted_mse_loss'] = totals.get('unweighted_mse_loss', 0.0) + unweighted_loss.item() * batch_n
             for key, value in metrics.items():
                 totals[key] = totals.get(key, 0.0) + value * batch_n
             totals['n'] += batch_n
     n = max(totals.pop('n'), 1)
     return {key: value / n for key, value in totals.items()}
-
 
 def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None):
     if not scheduler_cfg:
@@ -378,6 +448,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'model.out_channels={} does not match {} targets'.format(configured_out_channels, len(target_columns))
         )
     model_kwargs['out_channels'] = len(target_columns)
+    loss_weights = build_loss_weights(config, target_columns)
+    normalize_loss_weights = _normalize_loss_weights(config)
+    loss_weights_tensor = None if loss_weights is None else torch.tensor(loss_weights, dtype=torch.float32)
     device = train_cfg.get('device', 'cpu')
     if device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('Config requested CUDA, but torch.cuda.is_available() is False')
@@ -409,13 +482,14 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False)
 
     model = build_dimenetpp(**model_kwargs).to(device)
+    if loss_weights_tensor is not None:
+        loss_weights_tensor = loss_weights_tensor.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg['learning_rate']),
         weight_decay=float(train_cfg.get('weight_decay', 0.0)),
     )
     scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'))
-    loss_fn = torch.nn.MSELoss()
     history: list[dict[str, Any]] = []
     best_val = math.inf
     best_epoch: int | None = None
@@ -448,6 +522,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'test_subset_sizes': {subset: len(keys) for subset, keys in test_subset_key_groups.items()},
         'target_columns': list(target_columns),
         'target_dim': len(target_columns),
+        'loss': {
+            'type': (config.get('loss') or {}).get('type', 'mse'),
+            'weights': None if loss_weights is None else list(loss_weights),
+            'normalize': normalize_loss_weights,
+        },
         'config': config,
         'best_epoch': None,
         'best_val_loss': None,
@@ -470,11 +549,12 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             model.train()
             total_loss = 0.0
             total_n = 0
+            total_unweighted_loss = 0.0
             for batch in train_loader:
                 batch = batch.to(device)
                 target = batch.y.view(-1, len(target_columns))
                 pred = model(batch.z, batch.pos, batch.batch).view(-1, len(target_columns))
-                loss = loss_fn(pred, target)
+                loss = weighted_mse_loss(pred, target, loss_weights_tensor, normalize_loss_weights)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 if max_grad_norm > 0:
@@ -483,10 +563,12 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 batch_n = target.shape[0]
                 total_loss += loss.item() * batch_n
                 total_n += batch_n
+                if loss_weights_tensor is not None:
+                    total_unweighted_loss += weighted_mse_loss(pred.detach(), target).item() * batch_n
             train_seconds = time.perf_counter() - train_started
 
             val_started = time.perf_counter()
-            val_metrics = evaluate(model, val_loader, device, target_columns) if len(val_ds) else {'loss': float('nan')}
+            val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights) if len(val_ds) else {'loss': float('nan')}
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
@@ -503,6 +585,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 'val_samples_per_second': len(val_ds) / max(val_seconds, 1e-9) if len(val_ds) else 0.0,
                 **{f'val_{key}': value for key, value in val_metrics.items()},
             }
+            if loss_weights_tensor is not None:
+                record['train_unweighted_mse_loss'] = total_unweighted_loss / max(total_n, 1)
             history.append(record)
             print(record, flush=True)
             write_history_csv(metrics_csv_path, history)
@@ -558,13 +642,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             checkpoint = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
 
-        test_metrics = evaluate(model, test_loader, device, target_columns) if len(test_ds) else {}
+        test_metrics = evaluate(model, test_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
             for subset_name, subset_keys in test_subset_key_groups.items():
                 subset_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], subset_keys, target_columns)
                 subset_loader = _make_loader(subset_ds, train_cfg, device, shuffle=False)
-                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns)
+                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
         if wandb_run.enabled and per_subset_test_metrics:
             flat_subset_metrics = {
