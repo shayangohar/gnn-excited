@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import random
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 try:
@@ -32,6 +34,33 @@ from gnn_excited.models.dimenetpp import build_dimenetpp
 def load_config(path: str | Path) -> dict[str, Any]:
     with Path(path).open('r', encoding='utf-8') as stream:
         return yaml.safe_load(stream)
+
+
+def seed_everything(seed: int, deterministic_algorithms: bool = False) -> dict[str, Any]:
+    seed = int(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch.backends, 'cudnn'):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = bool(deterministic_algorithms)
+    torch.use_deterministic_algorithms(bool(deterministic_algorithms), warn_only=True)
+    return {
+        'seed': seed,
+        'python_hash_seed': os.environ['PYTHONHASHSEED'],
+        'deterministic_algorithms': bool(deterministic_algorithms),
+        'cudnn_deterministic': bool(getattr(torch.backends.cudnn, 'deterministic', False)),
+        'cudnn_benchmark': bool(getattr(torch.backends.cudnn, 'benchmark', False)),
+    }
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2**32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 
 def _load_manifest_rows(path: str | Path) -> list[dict[str, str]]:
@@ -246,12 +275,18 @@ def _dataloader_kwargs(train_cfg: dict[str, Any], device: str) -> dict[str, Any]
     return kwargs
 
 
-def _make_loader(dataset, train_cfg: dict[str, Any], device: str, shuffle: bool):
+def _make_loader(dataset, train_cfg: dict[str, Any], device: str, shuffle: bool, seed: int):
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    kwargs = _dataloader_kwargs(train_cfg, device)
+    if int(kwargs['num_workers']) > 0:
+        kwargs['worker_init_fn'] = seed_worker
     return DataLoader(
         dataset,
         batch_size=int(train_cfg['batch_size']),
         shuffle=shuffle,
-        **_dataloader_kwargs(train_cfg, device),
+        generator=generator,
+        **kwargs,
     )
 
 
@@ -455,6 +490,12 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if device == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('Config requested CUDA, but torch.cuda.is_available() is False')
 
+    training_seed = int(train_cfg.get('seed', dataset_cfg.get('split_seed', 0)))
+    reproducibility = seed_everything(
+        training_seed,
+        deterministic_algorithms=bool(train_cfg.get('deterministic_algorithms', False)),
+    )
+
     checkpoint_path = Path(train_cfg['checkpoint_path'])
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_csv_path = Path(train_cfg.get('metrics_csv_path') or _default_metrics_csv_path(checkpoint_path))
@@ -477,9 +518,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
     test_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx), target_columns)
 
-    train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True)
-    val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False)
-    test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False)
+    train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True, seed=training_seed)
+    val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False, seed=training_seed + 1)
+    test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False, seed=training_seed + 2)
 
     model = build_dimenetpp(**model_kwargs).to(device)
     if loss_weights_tensor is not None:
@@ -513,6 +554,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'summary_json_path': str(summary_json_path),
         'device': device,
         'environment': collect_run_metadata(device),
+        'reproducibility': reproducibility,
         'manifest_ok_rows': manifest_ok_rows,
         'dataset_rows_used': len(rows),
         'hdf5_path': str(dataset_cfg['hdf5_path']),
@@ -645,9 +687,15 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         test_metrics = evaluate(model, test_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
-            for subset_name, subset_keys in test_subset_key_groups.items():
+            for subset_index, (subset_name, subset_keys) in enumerate(test_subset_key_groups.items()):
                 subset_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], subset_keys, target_columns)
-                subset_loader = _make_loader(subset_ds, train_cfg, device, shuffle=False)
+                subset_loader = _make_loader(
+                    subset_ds,
+                    train_cfg,
+                    device,
+                    shuffle=False,
+                    seed=training_seed + 100 + subset_index,
+                )
                 per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
         if wandb_run.enabled and per_subset_test_metrics:

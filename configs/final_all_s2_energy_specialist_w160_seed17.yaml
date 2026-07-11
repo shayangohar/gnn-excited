@@ -1,0 +1,72 @@
+model:
+  cutoff: 5
+  num_blocks: 4
+  hidden_channels: 160
+  out_emb_channels: 320
+  int_emb_size: 80
+  basis_emb_size: 16
+  num_radial: 6
+  num_spherical: 3
+  max_num_neighbors: 32
+  out_channels: 1
+
+dataset:
+  hdf5_path: data/final_all.hdf5
+  manifest_path: data/processed/final_all_manifest_s5.csv
+  max_manifest_molecules:
+  local_copy: true
+  local_copy_dir: ${SPECIALIST_SCRATCH_ROOT}
+  report_subset_metrics: true
+  split_seed: 17
+  train_fraction: 0.8
+  val_fraction: 0.1
+
+targets:
+  columns:
+    - S2_eV
+
+loss:
+  type: mse
+
+training:
+  device: cuda
+  seed: 17
+  deterministic_algorithms: false
+  epochs: 200
+  batch_size: 64
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  max_grad_norm: 1.0
+  dataloader:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+  scheduler:
+    type: reduce_on_plateau
+    mode: min
+    factor: 0.5
+    patience: 8
+    min_lr: 0.000001
+  early_stopping_patience: 25
+  early_stopping_min_delta: 0.00001
+  checkpoint_path: checkpoints/dimenetpp_final_all_s2_energy_specialist_w160_seed17.pt
+  metrics_csv_path: runs/dimenetpp_final_all_s2_energy_specialist_w160_seed17.metrics.csv
+  summary_json_path: runs/dimenetpp_final_all_s2_energy_specialist_w160_seed17.summary.json
+
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: dimenetpp_final_all_s2_energy_specialist_w160_seed17
+  group: final-all-s2-s5-energy-specialists-w160-seed17
+  tags:
+    - QCDGE-full
+    - S2
+    - energy-only
+    - state-specialist
+    - width-160
+    - seed-17
+    - gradient-clipping
+    - local-hdf5-copy
+    - dataloader-workers

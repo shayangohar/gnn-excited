@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import json
+import random
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from gnn_excited.train import (
@@ -12,6 +14,7 @@ from gnn_excited.train import (
     build_scheduler,
     classify_validation_improvement,
     collect_run_metadata,
+    seed_everything,
     weighted_mse_loss,
     write_history_csv,
     write_summary_json,
@@ -54,6 +57,29 @@ def test_collect_run_metadata_includes_reproducibility_fields(monkeypatch) -> No
     assert "torch_version" in metadata
     assert "torch_geometric_version" in metadata
     assert metadata["slurm"]["job_id"] == "12345"
+
+
+def test_seed_everything_repeats_python_numpy_and_torch_rngs() -> None:
+    torch = pytest.importorskip("torch")
+
+    first_metadata = seed_everything(17)
+    first = (
+        random.random(),
+        np.random.random(),
+        torch.rand(3),
+    )
+    second_metadata = seed_everything(17)
+    second = (
+        random.random(),
+        np.random.random(),
+        torch.rand(3),
+    )
+
+    assert first_metadata["seed"] == 17
+    assert second_metadata["python_hash_seed"] == "17"
+    assert first[0] == second[0]
+    assert first[1] == second[1]
+    assert torch.equal(first[2], second[2])
 
 
 def test_build_scheduler_supports_reduce_on_plateau() -> None:
