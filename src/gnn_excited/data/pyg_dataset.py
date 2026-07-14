@@ -122,3 +122,41 @@ def deterministic_split(rows: Sequence[dict[str, str]], seed: int, train_fractio
     val_idx = indices[n_train : n_train + n_val]
     test_idx = indices[n_train + n_val :]
     return train_idx.tolist(), val_idx.tolist(), test_idx.tolist()
+
+
+def explicit_split(
+    rows: Sequence[dict[str, str]], split_path: str | Path, split_column: str
+) -> tuple[list[int], list[int], list[int]]:
+    """Resolve manifest rows against a persisted train/validation/test assignment table."""
+    assignments: dict[str, str] = {}
+    with Path(split_path).open('r', newline='', encoding='utf-8') as stream:
+        reader = csv.DictReader(stream)
+        required = {'molecule_key', split_column}
+        missing_columns = required.difference(reader.fieldnames or [])
+        if missing_columns:
+            raise ValueError(f'Split file {split_path} is missing columns: {sorted(missing_columns)}')
+        for row in reader:
+            key = row['molecule_key']
+            split = row[split_column].strip().lower()
+            if split not in {'train', 'val', 'test'}:
+                raise ValueError(f'Invalid split {split!r} for molecule {key}')
+            if key in assignments:
+                raise ValueError(f'Duplicate molecule_key {key!r} in split file {split_path}')
+            assignments[key] = split
+
+    indices = {'train': [], 'val': [], 'test': []}
+    missing_keys: list[str] = []
+    for index, row in enumerate(rows):
+        key = row['molecule_key']
+        split = assignments.get(key)
+        if split is None:
+            missing_keys.append(key)
+            continue
+        indices[split].append(index)
+    if missing_keys:
+        preview = ', '.join(missing_keys[:5])
+        raise ValueError(f'Split file {split_path} is missing {len(missing_keys)} manifest keys: {preview}')
+    if any(not indices[name] for name in ('train', 'val', 'test')):
+        sizes = {name: len(values) for name, values in indices.items()}
+        raise ValueError(f'Explicit split must populate train, val, and test; found {sizes}')
+    return indices['train'], indices['val'], indices['test']

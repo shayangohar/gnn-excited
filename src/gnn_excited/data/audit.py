@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -59,31 +60,56 @@ def _normalise_inchi(value: str | None) -> str:
     return "".join((value or "").strip().split())
 
 
-def canonicalize_identity(smiles: str | None, inchi: str | None) -> tuple[str, str, str]:
-    """Return canonical isomeric SMILES, normalized InChI, and InChIKey."""
+def _identity_candidates(values: Iterable[str | None]) -> list[str]:
+    candidates: list[str] = []
+    for value in values:
+        text = (value or "").strip()
+        if not text or text.lower() in {"1", "nan", "none", "null"} or text in candidates:
+            continue
+        candidates.append(text)
+    return candidates
+
+
+def _canonicalize_identity_candidates(
+    smiles_values: Iterable[str | None], inchi_values: Iterable[str | None]
+) -> tuple[str, str, str, list[str]]:
     Chem, _ = _require_rdkit()
-    smiles_text = (smiles or "").strip()
-    inchi_text = _normalise_inchi(inchi)
-
+    warnings: list[str] = []
     canonical_smiles = ""
-    smiles_mol = Chem.MolFromSmiles(smiles_text) if smiles_text else None
-    if smiles_text and smiles_mol is None:
-        raise ValueError(f"RDKit could not parse SMILES {smiles_text!r}")
-    if smiles_mol is not None:
+    for smiles_text in _identity_candidates(smiles_values):
+        smiles_mol = Chem.MolFromSmiles(smiles_text)
+        if smiles_mol is None:
+            warnings.append(f"RDKit could not parse SMILES {smiles_text!r}")
+            continue
         canonical_smiles = Chem.MolToSmiles(smiles_mol, canonical=True, isomericSmiles=True)
+        break
 
+    canonical_inchi = ""
     inchi_key = ""
-    inchi_mol = Chem.MolFromInchi(inchi_text) if inchi_text else None
-    if inchi_text and inchi_mol is None:
-        raise ValueError(f"RDKit could not parse InChI {inchi_text!r}")
-    if inchi_mol is not None:
+    for inchi_value in _identity_candidates(inchi_values):
+        inchi_text = _normalise_inchi(inchi_value)
+        inchi_mol = Chem.MolFromInchi(inchi_text)
+        if inchi_mol is None:
+            warnings.append(f"RDKit could not parse InChI {inchi_text!r}")
+            continue
+        canonical_inchi = inchi_text
         inchi_key = Chem.MolToInchiKey(inchi_mol)
         if not canonical_smiles:
             canonical_smiles = Chem.MolToSmiles(inchi_mol, canonical=True, isomericSmiles=True)
+        break
 
     if not canonical_smiles and not inchi_key:
-        raise ValueError("Both canonical SMILES and InChI are missing")
-    return canonical_smiles, inchi_text, inchi_key
+        detail = "; ".join(warnings) or "all identity fields are empty or sentinel values"
+        raise ValueError(f"No usable SMILES or InChI identity: {detail}")
+    return canonical_smiles, canonical_inchi, inchi_key, warnings
+
+
+def canonicalize_identity(smiles: str | None, inchi: str | None) -> tuple[str, str, str]:
+    """Return the usable canonical identity even when one representation is invalid."""
+    canonical_smiles, canonical_inchi, inchi_key, _ = _canonicalize_identity_candidates(
+        [smiles], [inchi]
+    )
+    return canonical_smiles, canonical_inchi, inchi_key
 
 
 def read_identity_csv(path: str | Path) -> tuple[list[MoleculeIdentity], list[dict[str, str]]]:
@@ -102,9 +128,9 @@ def read_identity_csv(path: str | Path) -> tuple[list[MoleculeIdentity], list[di
                 errors.append({"row": str(row_number), "molecule_key": "", "error": "missing Index"})
                 continue
             try:
-                smiles, inchi, inchi_key = canonicalize_identity(
-                    row.get("Smiles_rdkit_can") or row.get("Smiles_rdkit"),
-                    row.get("InchI_rdkit") or row.get("InchI_pybel"),
+                smiles, inchi, inchi_key, row_warnings = _canonicalize_identity_candidates(
+                    [row.get("Smiles_rdkit_can"), row.get("Smiles_rdkit"), row.get("Smiles_pybel")],
+                    [row.get("InchI_rdkit"), row.get("InchI_pybel")],
                 )
                 records.append(
                     MoleculeIdentity(
@@ -117,7 +143,29 @@ def read_identity_csv(path: str | Path) -> tuple[list[MoleculeIdentity], list[di
                         compound_type=(row.get("CompoundType") or "").strip(),
                     )
                 )
+                if row_warnings or (row.get("Smiles_rdkit_can") or "").strip() == "1":
+                    warning_parts = list(row_warnings)
+                    if (row.get("Smiles_rdkit_can") or "").strip() == "1":
+                        warning_parts.insert(0, "used Pybel fallback because RDKit identity columns contain sentinel 1")
+                    errors.append(
+                        {
+                            "row": str(row_number),
+                            "molecule_key": molecule_key,
+                            "error": "; ".join(warning_parts),
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001 - audit must preserve every failure.
+                records.append(
+                    MoleculeIdentity(
+                        molecule_key=molecule_key,
+                        canonical_smiles="",
+                        canonical_inchi="",
+                        inchi_key="",
+                        heavy_atom_count=_optional_int(row.get("HeavyAtomCount")),
+                        ring_count=_optional_int(row.get("RingNumber")),
+                        compound_type=(row.get("CompoundType") or "").strip(),
+                    )
+                )
                 errors.append({"row": str(row_number), "molecule_key": molecule_key, "error": str(exc)})
             if (row_number - 1) % 10000 == 0:
                 print(
@@ -169,8 +217,8 @@ def deduplicate_identities(
         "duplicate_identity_rows": len(duplicate_identity_rows),
         "smiles_with_multiple_inchi_keys": sum(len(values) > 1 for values in smiles_to_inchi.values()),
         "inchi_keys_with_multiple_smiles": sum(len(values) > 1 for values in inchi_to_smiles.values()),
-        "duplicate_ids": duplicate_ids[:100],
-        "duplicate_identities": duplicate_identity_rows[:100],
+        "duplicate_ids": duplicate_ids,
+        "duplicate_identities": duplicate_identity_rows,
     }
     return selected, report
 
@@ -216,7 +264,7 @@ def inspect_hdf5_only_identities(
     hdf5_only_ids: Sequence[str],
     official_records: Sequence[MoleculeIdentity],
     output_path: str | Path,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], list[MoleculeIdentity]]:
     """Classify HDF5-only groups against published identities using group attributes."""
     composite_to_ids: dict[tuple[str, ...], list[str]] = defaultdict(list)
     smiles_to_ids: dict[str, list[str]] = defaultdict(list)
@@ -231,13 +279,21 @@ def inspect_hdf5_only_identities(
     rows: list[dict[str, str]] = []
     identities: Counter[tuple[str, ...]] = Counter()
     match_counts: Counter[str] = Counter()
+    parsed_records: list[MoleculeIdentity] = []
     with h5py.File(hdf5_path, "r") as handle:
         for index, molecule_key in enumerate(hdf5_only_ids, start=1):
             attributes = dict(handle[molecule_key].attrs.items())
-            smiles_raw = _attribute_value(
-                attributes, "Smiles_rdkit_can", "Smiles_rdkit", "canonical_smiles", "Smiles_pybel"
-            )
-            inchi_raw = _attribute_value(attributes, "InchI_rdkit", "InChI", "InchI_pybel")
+            smiles_values = [
+                _attribute_value(attributes, "Smiles_rdkit_can"),
+                _attribute_value(attributes, "Smiles_rdkit"),
+                _attribute_value(attributes, "canonical_smiles"),
+                _attribute_value(attributes, "Smiles_pybel"),
+            ]
+            inchi_values = [
+                _attribute_value(attributes, "InchI_rdkit"),
+                _attribute_value(attributes, "InChI"),
+                _attribute_value(attributes, "InchI_pybel"),
+            ]
             row = {
                 "molecule_key": molecule_key,
                 "canonical_smiles": "",
@@ -248,8 +304,11 @@ def inspect_hdf5_only_identities(
                 "error": "",
             }
             try:
-                smiles, inchi, inchi_key = canonicalize_identity(smiles_raw, inchi_raw)
+                smiles, inchi, inchi_key, identity_warnings = _canonicalize_identity_candidates(
+                    smiles_values, inchi_values
+                )
                 identity = MoleculeIdentity(molecule_key, smiles, inchi, inchi_key, None, None, "")
+                parsed_records.append(identity)
                 identities[identity.identity_key] += 1
                 exact_ids = composite_to_ids.get(identity.identity_key, [])
                 smiles_ids = smiles_to_ids.get(smiles, [])
@@ -271,6 +330,7 @@ def inspect_hdf5_only_identities(
                         "inchi_key": inchi_key,
                         "match_type": match_type,
                         "matched_official_ids": ";".join(matched),
+                        "error": "; ".join(identity_warnings),
                     }
                 )
                 match_counts[match_type] += 1
@@ -295,11 +355,14 @@ def inspect_hdf5_only_identities(
         ],
         rows,
     )
-    return {
-        "match_counts": dict(match_counts),
-        "unique_hdf5_only_identities": len(identities),
-        "duplicate_hdf5_only_rows": sum(count - 1 for count in identities.values() if count > 1),
-    }
+    return (
+        {
+            "match_counts": dict(match_counts),
+            "unique_hdf5_only_identities": len(identities),
+            "duplicate_hdf5_only_rows": sum(count - 1 for count in identities.values() if count > 1),
+        },
+        parsed_records,
+    )
 
 
 def random_assignments(keys: Sequence[str], seed: int, fractions: Sequence[float]) -> dict[str, str]:
@@ -462,6 +525,167 @@ def _filter_manifest(
     return found, usable, counts
 
 
+def _numeric_summary(values: Sequence[float]) -> dict[str, float | int | None]:
+    if not values:
+        return {"count": 0, "mean": None, "median": None, "p95": None, "max": None}
+    array = np.asarray(values, dtype=np.float64)
+    return {
+        "count": len(values),
+        "mean": float(np.mean(array)),
+        "median": float(np.median(array)),
+        "p95": float(np.quantile(array, 0.95)),
+        "max": float(np.max(array)),
+    }
+
+
+def analyze_duplicate_target_differences(
+    manifest_path: str | Path,
+    duplicate_rows: Sequence[Mapping[str, str]],
+    output_path: str | Path,
+) -> dict[str, object]:
+    """Compare all available state targets for canonical-identity duplicate pairs."""
+    pair_keys = {
+        key
+        for pair in duplicate_rows
+        for key in (pair["molecule_key"], pair["representative_key"])
+    }
+    rows_by_key: dict[str, dict[str, str]] = {}
+    with Path(manifest_path).open("r", newline="", encoding="utf-8") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = reader.fieldnames or []
+        energy_columns = [column for column in fieldnames if re.fullmatch(r"[ST]\d+_eV", column)]
+        oscillator_columns = [column for column in fieldnames if re.fullmatch(r"[ST]\d+_f", column)]
+        target_columns = energy_columns + oscillator_columns
+        for row in reader:
+            if row.get("status") == "ok" and row.get("molecule_key") in pair_keys:
+                rows_by_key[row["molecule_key"]] = row
+
+    output_rows: list[dict[str, object]] = []
+    max_energy_differences: list[float] = []
+    max_oscillator_differences: list[float] = []
+    missing_pairs = 0
+    for pair in duplicate_rows:
+        duplicate = rows_by_key.get(pair["molecule_key"])
+        representative = rows_by_key.get(pair["representative_key"])
+        if duplicate is None or representative is None:
+            missing_pairs += 1
+            continue
+        row: dict[str, object] = {
+            "molecule_key": pair["molecule_key"],
+            "representative_key": pair["representative_key"],
+            "identity": pair["identity"],
+        }
+        energy_differences: list[float] = []
+        oscillator_differences: list[float] = []
+        for column in target_columns:
+            difference = abs(float(duplicate[column]) - float(representative[column]))
+            row[f"{column}_abs_diff"] = difference
+            if column in energy_columns:
+                energy_differences.append(difference)
+            else:
+                oscillator_differences.append(difference)
+        max_energy = max(energy_differences, default=0.0)
+        max_oscillator = max(oscillator_differences, default=0.0)
+        row["max_energy_abs_diff_eV"] = max_energy
+        row["max_oscillator_abs_diff"] = max_oscillator
+        output_rows.append(row)
+        max_energy_differences.append(max_energy)
+        max_oscillator_differences.append(max_oscillator)
+
+    output_fields = ["molecule_key", "representative_key", "identity"]
+    output_fields.extend(f"{column}_abs_diff" for column in target_columns)
+    output_fields.extend(["max_energy_abs_diff_eV", "max_oscillator_abs_diff"])
+    _write_csv(Path(output_path), output_fields, output_rows)
+    return {
+        "pairs_requested": len(duplicate_rows),
+        "pairs_compared": len(output_rows),
+        "pairs_missing_targets": missing_pairs,
+        "pairs_with_any_energy_difference_over_chemical_accuracy": sum(
+            value > 0.043 for value in max_energy_differences
+        ),
+        "pairs_with_numerically_identical_targets": sum(
+            energy <= 1e-6 and oscillator <= 1e-8
+            for energy, oscillator in zip(max_energy_differences, max_oscillator_differences)
+        ),
+        "max_energy_abs_diff_eV": _numeric_summary(max_energy_differences),
+        "max_oscillator_abs_diff": _numeric_summary(max_oscillator_differences),
+    }
+
+
+def analyze_legacy_random_split_leakage(
+    manifest_path: str | Path,
+    identity_records: Sequence[MoleculeIdentity],
+    output_path: str | Path,
+    seed: int,
+    fractions: Sequence[float],
+) -> dict[str, object]:
+    """Replay the old row-random split and count strict identity groups crossing partitions."""
+    manifest_keys: list[str] = []
+    with Path(manifest_path).open("r", newline="", encoding="utf-8") as stream:
+        for row in csv.DictReader(stream):
+            if row.get("status") == "ok":
+                manifest_keys.append(row["molecule_key"])
+    assignments = random_assignments(manifest_keys, seed, fractions)
+    identity_by_key = {
+        record.molecule_key: record.identity_key
+        for record in identity_records
+        if record.identity_key[0] != "molecule-key"
+    }
+    groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for key in manifest_keys:
+        identity = identity_by_key.get(key)
+        if identity is not None:
+            groups[identity].append(key)
+
+    duplicate_groups = {identity: keys for identity, keys in groups.items() if len(keys) > 1}
+    rows: list[dict[str, object]] = []
+    leaking_groups = 0
+    leaking_rows = 0
+    train_test_groups = 0
+    test_rows_exposed_to_train = 0
+    exposed_by_subset: Counter[str] = Counter()
+    for identity, keys in duplicate_groups.items():
+        splits = {assignments[key] for key in keys}
+        leaking = len(splits) > 1
+        train_test = "train" in splits and "test" in splits
+        if leaking:
+            leaking_groups += 1
+            leaking_rows += len(keys)
+        if train_test:
+            train_test_groups += 1
+            exposed_test_keys = [key for key in keys if assignments[key] == "test"]
+            test_rows_exposed_to_train += len(exposed_test_keys)
+            exposed_by_subset.update(key[:2] for key in exposed_test_keys)
+        rows.append(
+            {
+                "identity": "|".join(identity),
+                "member_count": len(keys),
+                "splits": ";".join(sorted(splits)),
+                "leaking": str(leaking).lower(),
+                "train_test_leak": str(train_test).lower(),
+                "molecule_keys": ";".join(keys),
+            }
+        )
+    _write_csv(
+        Path(output_path),
+        ["identity", "member_count", "splits", "leaking", "train_test_leak", "molecule_keys"],
+        rows,
+    )
+    return {
+        "policy": "strict canonical SMILES+InChI identity; attribute-unparseable rows are excluded",
+        "seed": seed,
+        "manifest_ok_rows": len(manifest_keys),
+        "rows_with_parsed_identity": sum(key in identity_by_key for key in manifest_keys),
+        "duplicate_identity_groups": len(duplicate_groups),
+        "rows_in_duplicate_identity_groups": sum(len(keys) for keys in duplicate_groups.values()),
+        "identity_groups_crossing_splits": leaking_groups,
+        "rows_in_cross_split_identity_groups": leaking_rows,
+        "identity_groups_crossing_train_test": train_test_groups,
+        "test_rows_with_identity_in_train": test_rows_exposed_to_train,
+        "test_rows_with_identity_in_train_by_subset": dict(sorted(exposed_by_subset.items())),
+    }
+
+
 def run_qcdge_audit(
     csv_path: str | Path,
     hdf5_path: str | Path,
@@ -476,19 +700,26 @@ def run_qcdge_audit(
     """Audit full QCDGE identities, integrity, manifests, and leakage-safe splits."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    records, identity_errors = read_identity_csv(csv_path)
+    records, identity_warnings = read_identity_csv(csv_path)
+    unparsed_identity_ids = {
+        record.molecule_key for record in records if record.identity_key[0] == "molecule-key"
+    }
+    identity_errors = [
+        warning for warning in identity_warnings if warning["molecule_key"] in unparsed_identity_ids
+    ]
     selected, dedup_report = deduplicate_identities(records)
     selected_ids = {record.molecule_key for record in selected}
+    duplicate_rows = dedup_report["duplicate_identities"]
 
     with h5py.File(hdf5_path, "r") as handle:
         hdf5_ids = set(map(str, handle.keys()))
     csv_ids = {record.molecule_key for record in records}
     csv_missing_hdf5 = sorted(csv_ids - hdf5_ids)
     hdf5_only = sorted(hdf5_ids - csv_ids)
-    hdf5_only_report = inspect_hdf5_only_identities(
+    hdf5_only_report, hdf5_only_records = inspect_hdf5_only_identities(
         hdf5_path,
         hdf5_only,
-        selected,
+        records,
         output_dir / "hdf5_only_identity.csv",
     )
 
@@ -496,6 +727,18 @@ def run_qcdge_audit(
         Path(source_manifest_path), Path(deduplicated_manifest_path), selected_ids & hdf5_ids
     )
     eligible = [record for record in selected if record.molecule_key in usable_manifest_ids]
+    duplicate_target_report = analyze_duplicate_target_differences(
+        source_manifest_path,
+        duplicate_rows,
+        output_dir / "duplicate_target_differences.csv",
+    )
+    legacy_leakage_report = analyze_legacy_random_split_leakage(
+        source_manifest_path,
+        [*records, *hdf5_only_records],
+        output_dir / "legacy_random_split_identity_groups.csv",
+        seed,
+        fractions,
+    )
 
     scaffold_by_key: dict[str, str] = {}
     core_by_key: dict[str, str] = {}
@@ -507,10 +750,13 @@ def run_qcdge_audit(
             core_by_key[record.molecule_key] = core
         except Exception as exc:  # noqa: BLE001 - audit must preserve every failure.
             scaffold_errors.append({"molecule_key": record.molecule_key, "error": str(exc)})
+            fallback = f"unparsed:{record.molecule_key}"
+            scaffold_by_key[record.molecule_key] = fallback
+            core_by_key[record.molecule_key] = fallback
         if index % 10000 == 0:
             print(f"computed scaffold/core keys for {index} molecules", flush=True)
 
-    split_ids = [record.molecule_key for record in eligible if record.molecule_key in scaffold_by_key]
+    split_ids = [record.molecule_key for record in eligible]
     random_split = random_assignments(split_ids, seed, fractions)
     scaffold_split = grouped_assignments({key: scaffold_by_key[key] for key in split_ids}, seed, fractions)
     core_split = grouped_assignments({key: core_by_key[key] for key in split_ids}, seed, fractions)
@@ -552,7 +798,13 @@ def run_qcdge_audit(
             for key in split_ids
         ),
     )
+    _write_csv(output_dir / "identity_warnings.csv", ["row", "molecule_key", "error"], identity_warnings)
     _write_csv(output_dir / "identity_errors.csv", ["row", "molecule_key", "error"], identity_errors)
+    _write_csv(
+        output_dir / "duplicate_identities.csv",
+        ["molecule_key", "representative_key", "identity"],
+        duplicate_rows,
+    )
     _write_csv(output_dir / "scaffold_errors.csv", ["molecule_key", "error"], scaffold_errors)
     _write_csv(
         output_dir / "hdf5_only_keys.csv", ["molecule_key"], ({"molecule_key": key} for key in hdf5_only)
@@ -581,7 +833,11 @@ def run_qcdge_audit(
             "hdf5": str(hdf5_path),
             "source_manifest": str(source_manifest_path),
         },
-        "identity": {**dedup_report, "canonicalization_errors": len(identity_errors)},
+        "identity": {
+            **dedup_report,
+            "canonicalization_warnings": len(identity_warnings),
+            "records_without_usable_identity": len(unparsed_identity_ids),
+        },
         "alignment": {
             "hdf5_keys": len(hdf5_ids),
             "csv_unique_ids": len(csv_ids),
@@ -591,6 +847,8 @@ def run_qcdge_audit(
             "hdf5_only_identity_matches": hdf5_only_report,
         },
         "manifest": manifest_report,
+        "duplicate_target_differences": duplicate_target_report,
+        "legacy_random_split_leakage": legacy_leakage_report,
         "eligible_molecules": len(split_ids),
         "scaffolds": {
             "errors": len(scaffold_errors),

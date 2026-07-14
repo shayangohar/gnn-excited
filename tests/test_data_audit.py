@@ -5,13 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from gnn_excited.data.pyg_dataset import explicit_split
 from gnn_excited.data.audit import (
     MoleculeIdentity,
+    analyze_duplicate_target_differences,
+    canonicalize_identity,
     assert_no_group_leakage,
     deduplicate_identities,
     grouped_assignments,
     parse_sha512_file,
     random_assignments,
+    read_identity_csv,
     scaffold_keys,
     verify_sha512_files,
 )
@@ -62,6 +66,49 @@ def test_scaffold_keys_use_topology_fallback_for_acyclic_molecules() -> None:
     assert cyclic_core == "C1CCCCC1"
 
 
+def test_identity_csv_uses_pybel_when_rdkit_columns_contain_sentinel(tmp_path: Path) -> None:
+    pytest.importorskip("rdkit")
+    csv_path = tmp_path / "identities.csv"
+    csv_path.write_text(
+        "Index,HeavyAtomCount,RingNumber,CompoundType,Smiles_pybel,InchI_pybel,"
+        "Smiles_rdkit,InchI_rdkit,Smiles_rdkit_can\n"
+        "Aa1,3,0,test,CCO,InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3,1,1,1\n",
+        encoding="utf-8",
+    )
+    records, warnings = read_identity_csv(csv_path)
+    assert len(records) == 1
+    assert records[0].canonical_smiles == "CCO"
+    assert records[0].inchi_key == "LFQSCWFLJHTTHZ-UHFFFAOYSA-N"
+    assert "Pybel fallback" in warnings[0]["error"]
+
+
+def test_identity_keeps_valid_smiles_when_inchi_is_invalid() -> None:
+    pytest.importorskip("rdkit")
+    smiles, inchi, inchi_key = canonicalize_identity("CCO", "not-an-inchi")
+    assert smiles == "CCO"
+    assert inchi == ""
+    assert inchi_key == ""
+
+
+def test_duplicate_target_analysis_reports_large_disagreement(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.csv"
+    manifest.write_text(
+        "molecule_key,S1_eV,S1_f,status,error\n"
+        "A,4.0,0.1,ok,\n"
+        "B,4.1,0.2,ok,\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "differences.csv"
+    report = analyze_duplicate_target_differences(
+        manifest,
+        [{"molecule_key": "B", "representative_key": "A", "identity": "same"}],
+        output,
+    )
+    assert report["pairs_compared"] == 1
+    assert report["pairs_with_any_energy_difference_over_chemical_accuracy"] == 1
+    assert output.exists()
+
+
 def test_sha512_parser_and_verifier(tmp_path: Path) -> None:
     payload = b"qcdge"
     data_path = tmp_path / "sample.hdf5"
@@ -72,3 +119,27 @@ def test_sha512_parser_and_verifier(tmp_path: Path) -> None:
     assert parse_sha512_file(checksum_path) == {"sample.hdf5": expected}
     result = verify_sha512_files(checksum_path)
     assert result["sample.hdf5"]["matches"] is True
+
+
+def test_explicit_split_resolves_manifest_rows(tmp_path: Path) -> None:
+    split_path = tmp_path / "splits.csv"
+    split_path.write_text(
+        "molecule_key,random_split,scaffold_split\n"
+        "A,train,test\n"
+        "B,val,train\n"
+        "C,test,val\n",
+        encoding="utf-8",
+    )
+    rows = [{"molecule_key": key} for key in ("A", "B", "C")]
+    assert explicit_split(rows, split_path, "random_split") == ([0], [1], [2])
+    assert explicit_split(rows, split_path, "scaffold_split") == ([1], [2], [0])
+
+
+def test_explicit_split_rejects_missing_manifest_keys(tmp_path: Path) -> None:
+    split_path = tmp_path / "splits.csv"
+    split_path.write_text(
+        "molecule_key,random_split\nA,train\nB,val\nC,test\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="missing 1 manifest keys"):
+        explicit_split([{"molecule_key": key} for key in ("A", "B", "C", "D")], split_path, "random_split")

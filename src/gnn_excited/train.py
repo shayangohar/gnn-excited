@@ -27,7 +27,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 else:
     _IMPORT_ERROR = None
 
-from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split
+from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, explicit_split
 from gnn_excited.models.dimenetpp import build_dimenetpp
 
 
@@ -507,12 +507,28 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     max_rows = dataset_cfg.get('max_manifest_molecules')
     if max_rows is not None:
         rows = rows[: int(max_rows)]
-    train_idx, val_idx, test_idx = deterministic_split(
-        rows,
-        seed=int(dataset_cfg['split_seed']),
-        train_fraction=float(dataset_cfg['train_fraction']),
-        val_fraction=float(dataset_cfg['val_fraction']),
-    )
+    split_path = dataset_cfg.get('split_path')
+    if split_path:
+        split_column = str(dataset_cfg.get('split_column', 'random_split'))
+        train_idx, val_idx, test_idx = explicit_split(rows, split_path, split_column)
+        split_metadata = {
+            'type': 'explicit',
+            'path': str(split_path),
+            'column': split_column,
+        }
+    else:
+        train_idx, val_idx, test_idx = deterministic_split(
+            rows,
+            seed=int(dataset_cfg['split_seed']),
+            train_fraction=float(dataset_cfg['train_fraction']),
+            val_fraction=float(dataset_cfg['val_fraction']),
+        )
+        split_metadata = {
+            'type': 'deterministic_random',
+            'seed': int(dataset_cfg['split_seed']),
+            'train_fraction': float(dataset_cfg['train_fraction']),
+            'val_fraction': float(dataset_cfg['val_fraction']),
+        }
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
     train_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx), target_columns)
     val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
@@ -561,6 +577,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'effective_hdf5_path': str(effective_hdf5_path),
         'dataloader': dataloader_cfg,
         'split_sizes': {'train': len(train_ds), 'val': len(val_ds), 'test': len(test_ds)},
+        'split': split_metadata,
         'test_subset_sizes': {subset: len(keys) for subset, keys in test_subset_key_groups.items()},
         'target_columns': list(target_columns),
         'target_dim': len(target_columns),
