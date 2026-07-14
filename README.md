@@ -108,6 +108,20 @@ HDF5 and manifest records, verifies SHA-512 hashes, and writes deterministic ran
 generic-core split assignments. Scaffold/core groups are kept wholly within one split; acyclic molecules
 use a generic full-molecule topology key instead of being collapsed into one empty-scaffold group.
 
+Validate that the persisted assignments cover every usable row in the deduplicated manifest before
+starting a training run:
+
+```powershell
+python scripts/validate_split.py `
+  --manifest data/processed/final_all_manifest_s5_dedup.csv `
+  --splits data/processed/qcdge_audit/splits.csv `
+  --columns random_split scaffold_split core_split
+```
+
+Training configs can select one of these persisted assignments with `dataset.split_path` and
+`dataset.split_column`. This avoids regenerating a row-level random split and keeps duplicate molecular
+identities confined to a single partition.
+
 ## Training
 
 Run a small CPU training job:
