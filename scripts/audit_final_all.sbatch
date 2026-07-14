@@ -5,8 +5,8 @@
 #SBATCH --partition=shared
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=32G
 #SBATCH --account=csn100
 #SBATCH --no-requeue
 #SBATCH --time=12:00:00
