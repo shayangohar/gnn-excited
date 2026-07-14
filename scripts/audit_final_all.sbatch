@@ -24,6 +24,7 @@ source /cm/shared/apps/spack/0.17.3/cpu/b/opt/spack/linux-rocky8-zen/gcc-8.5.0/a
 conda activate /expanse/lustre/projects/csn100/mgohar/gnn-excited/envs/gnn-excited-gpu
 
 RAW_DATA=/expanse/lustre/projects/csn100/mgohar/gnn-excited/data
+python -m pytest -q tests/test_data_audit.py
 python scripts/audit_qcdge.py \
   --csv "$RAW_DATA/final_all.csv" \
   --hdf5 "$RAW_DATA/final_all.hdf5" \
