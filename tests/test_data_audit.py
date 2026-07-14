@@ -72,7 +72,7 @@ def test_identity_csv_uses_pybel_when_rdkit_columns_contain_sentinel(tmp_path: P
     csv_path.write_text(
         "Index,HeavyAtomCount,RingNumber,CompoundType,Smiles_pybel,InchI_pybel,"
         "Smiles_rdkit,InchI_rdkit,Smiles_rdkit_can\n"
-        "Aa1,3,0,test,CCO,InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3,1,1,1\n",
+        'Aa1,3,0,test,CCO,"InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3",1,1,1\n',
         encoding="utf-8",
     )
     records, warnings = read_identity_csv(csv_path)
