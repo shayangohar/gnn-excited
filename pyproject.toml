@@ -32,6 +32,7 @@ test = [
 
 [project.scripts]
 build-qcdge-manifest = "gnn_excited.cli.build_manifest:main"
+audit-qcdge-data = "gnn_excited.cli.audit_data:main"
 train-dimenet = "gnn_excited.cli.train_dimenet:main"
 predict-smiles = "gnn_excited.cli.predict_smiles:main"
 

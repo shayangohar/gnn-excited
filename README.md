@@ -87,6 +87,27 @@ Inspect target distributions:
 python scripts/inspect_targets.py data/processed/a9_manifest_1000.csv
 ```
 
+### Full-dataset integrity audit
+
+Before training on `final_all`, reconcile the published molecule index with the HDF5 keys and target
+manifest:
+
+```powershell
+python scripts/audit_qcdge.py `
+  --csv data/final_all.csv `
+  --hdf5 data/final_all.hdf5 `
+  --manifest data/processed/final_all_manifest_s5.csv `
+  --dedup-manifest data/processed/final_all_manifest_s5_dedup.csv `
+  --out-dir data/processed/qcdge_audit `
+  --checksum-file data/SHA512SUM `
+  --compressed-hdf5 data/final_all.hdf5.gz
+```
+
+The audit canonicalizes RDKit SMILES and validates InChI identities, matches the published CSV index to
+HDF5 and manifest records, verifies SHA-512 hashes, and writes deterministic random, Murcko-scaffold, and
+generic-core split assignments. Scaffold/core groups are kept wholly within one split; acyclic molecules
+use a generic full-molecule topology key instead of being collapsed into one empty-scaffold group.
+
 ## Training
 
 Run a small CPU training job:
