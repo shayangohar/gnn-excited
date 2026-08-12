@@ -2,19 +2,24 @@
 #SBATCH --job-name=qcdge_audit_env
 #SBATCH --output=runs/%x.%j.%N.out
 #SBATCH --error=runs/%x.%j.%N.err
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
-#SBATCH --account=csn100
+#SBATCH --account=bhzu-delta-cpu
+#SBATCH --constraint="projects&work"
 #SBATCH --no-requeue
 #SBATCH --time=00:30:00
+#SBATCH --mail-user=shayangohar@mail.fresnostate.edu
+#SBATCH --mail-type=END,FAIL
 
 set -euo pipefail
-cd /home/mgohar/gnn-excited
+cd /projects/bhzu/gnn-excited
 mkdir -p runs
-source /cm/shared/apps/spack/0.17.3/cpu/b/opt/spack/linux-rocky8-zen/gcc-8.5.0/anaconda3-2021.05-q4munrgvh7qp4o7r3nzcdkbuph4z7375/etc/profile.d/conda.sh
-conda activate /expanse/lustre/projects/csn100/mgohar/gnn-excited/envs/gnn-excited-gpu
+source /etc/profile.d/modules.sh
+module purge
+module load cudatoolkit/25.3_12.8
+source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 python -m pip install --no-deps "rdkit>=2023.9"
 python -c "import rdkit; print(rdkit.__version__)"

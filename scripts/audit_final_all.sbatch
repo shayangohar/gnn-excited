@@ -2,28 +2,31 @@
 #SBATCH --job-name=qcdge_audit
 #SBATCH --output=runs/%x.%j.%N.out
 #SBATCH --error=runs/%x.%j.%N.err
-#SBATCH --partition=shared
+#SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --account=csn100
+#SBATCH --account=bhzu-delta-cpu
+#SBATCH --constraint="projects&work"
 #SBATCH --no-requeue
 #SBATCH --time=12:00:00
 #SBATCH --mail-user=shayangohar@mail.fresnostate.edu
 #SBATCH --mail-type=END,FAIL
 
 set -euo pipefail
-cd /home/mgohar/gnn-excited
+cd /projects/bhzu/gnn-excited
 mkdir -p data/processed/qcdge_audit runs
 export HDF5_USE_FILE_LOCKING=FALSE
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
-source /cm/shared/apps/spack/0.17.3/cpu/b/opt/spack/linux-rocky8-zen/gcc-8.5.0/anaconda3-2021.05-q4munrgvh7qp4o7r3nzcdkbuph4z7375/etc/profile.d/conda.sh
-conda activate /expanse/lustre/projects/csn100/mgohar/gnn-excited/envs/gnn-excited-gpu
+source /etc/profile.d/modules.sh
+module purge
+module load cudatoolkit/25.3_12.8
+source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 
-RAW_DATA=/expanse/lustre/projects/csn100/mgohar/gnn-excited/data
+RAW_DATA=/work/hdd/bhzu/gnn-excited/data
 python -m pytest -q tests/test_data_audit.py
 python scripts/audit_qcdge.py \
   --csv "$RAW_DATA/final_all.csv" \
