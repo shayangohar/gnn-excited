@@ -105,3 +105,61 @@ def test_shared_backbone_split_head_builds_split_output_blocks_when_pyg_availabl
     output = model.output_blocks[0](x, rbf, i, num_nodes=2)
 
     assert output.shape == (2, 4)
+
+
+def test_state_target_layout_pairs_and_orders_states() -> None:
+    from gnn_excited.models.dimenetpp import _state_target_layout
+
+    layout = _state_target_layout(
+        ('S2_eV', 'log1p_S2_f', 'S1_eV', 'log1p_S1_f')
+    )
+
+    assert layout == (('S1', 2, 3), ('S2', 0, 1))
+
+
+def test_state_target_layout_rejects_unpaired_state() -> None:
+    from gnn_excited.models.dimenetpp import _state_target_layout
+
+    with pytest.raises(ValueError, match='missing targets'):
+        _state_target_layout(('S1_eV', 'log1p_S1_f', 'S2_eV'))
+
+
+def test_state_conditioned_model_injects_each_state_throughout_when_pyg_available() -> None:
+    pytest.importorskip('torch_geometric')
+    torch = pytest.importorskip('torch')
+    from gnn_excited.models.dimenetpp import (
+        SplitOutputPPBlock,
+        StateConditionedGeometryDimeNetPlusPlus,
+        build_dimenetpp,
+    )
+
+    model = build_dimenetpp(
+        cutoff=3.0,
+        num_blocks=1,
+        hidden_channels=8,
+        out_emb_channels=8,
+        int_emb_size=4,
+        basis_emb_size=4,
+        num_radial=2,
+        num_spherical=2,
+        max_num_neighbors=8,
+        out_channels=4,
+        head_type='state_conditioned_geometry',
+        target_columns=('S1_eV', 'log1p_S1_f', 'S2_eV', 'log1p_S2_f'),
+        output_initializer='glorot_orthogonal',
+    )
+
+    assert isinstance(model, StateConditionedGeometryDimeNetPlusPlus)
+    assert model.state_labels == ('S1', 'S2')
+    assert len(model.state_projections) == 2
+    assert all(isinstance(block, SplitOutputPPBlock) for block in model.output_blocks)
+    assert model.output_blocks[0].energy_lin is not model.output_blocks[0].oscillator_lin
+
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+    output = model(z, pos, batch)
+
+    assert output.shape == (1, 4)
+    output.sum().backward()
+    assert model.state_embedding.weight.grad is not None

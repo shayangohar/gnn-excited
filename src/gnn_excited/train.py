@@ -483,6 +483,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'model.out_channels={} does not match {} targets'.format(configured_out_channels, len(target_columns))
         )
     model_kwargs['out_channels'] = len(target_columns)
+    model_kwargs['target_columns'] = target_columns
     loss_weights = build_loss_weights(config, target_columns)
     normalize_loss_weights = _normalize_loss_weights(config)
     loss_weights_tensor = None if loss_weights is None else torch.tensor(loss_weights, dtype=torch.float32)
