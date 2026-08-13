@@ -1,0 +1,33 @@
+dataset:
+  type: qm9gwbse
+  hdf5_path: data/processed/qm9gwbse/qm9gwbse.h5
+  manifest_path: data/processed/qm9gwbse/manifest.csv
+  split_path: data/processed/qm9gwbse/splits.csv
+  split_column: random_split
+  max_manifest_molecules: 16
+
+targets:
+  columns: [S1_eV, log1p_S1_f, S2_eV, log1p_S2_f, S3_eV, log1p_S3_f, S4_eV, log1p_S4_f, S5_eV, log1p_S5_f]
+
+model:
+  type: visnet
+  hidden_channels: 32
+  num_layers: 2
+  num_rbf: 8
+  cutoff: 5.0
+  max_num_neighbors: 16
+
+loss:
+  type: qm9gwbse
+  gap_weight: 0.1
+  ordering_weight: 0.01
+
+training:
+  seed: 17
+  deterministic_algorithms: true
+  batch_size: 4
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0
+  device: cpu
+  checkpoint_path: checkpoints/visnet_qm9gwbse_overfit.pt

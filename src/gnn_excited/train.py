@@ -28,7 +28,10 @@ else:
     _IMPORT_ERROR = None
 
 from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, explicit_split
+from gnn_excited.data.qm9gwbse import QM9GWBSEDataset
 from gnn_excited.models.dimenetpp import build_dimenetpp
+from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
+from gnn_excited.losses import qm9gwbse_loss
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -68,6 +71,26 @@ def _load_manifest_rows(path: str | Path) -> list[dict[str, str]]:
         return [row for row in csv.DictReader(stream) if row.get('status') == 'ok']
 
 
+def filter_manifest_exclusions(
+    rows: list[dict[str, str]],
+    exclusion_path: str | Path | None,
+) -> tuple[list[dict[str, str]], int]:
+    """Remove manifest rows named by an explicit QCDGE exclusion CSV."""
+    if not exclusion_path:
+        return rows, 0
+    path = Path(exclusion_path)
+    with path.open("r", newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        fieldnames = set(reader.fieldnames or ())
+        key_column = "qcdge_molecule_key" if "qcdge_molecule_key" in fieldnames else "molecule_key" if "molecule_key" in fieldnames else None
+        if key_column is None:
+            raise ValueError(f"Exclusion file {path} must contain qcdge_molecule_key or molecule_key")
+        excluded = {(row.get(key_column) or "").strip() for row in reader}
+    excluded.discard("")
+    filtered = [row for row in rows if row.get("molecule_key", "").strip() not in excluded]
+    return filtered, len(rows) - len(filtered)
+
+
 def _subset_keys(rows: list[dict[str, str]], indices: list[int]) -> list[str]:
     return [rows[i]['molecule_key'] for i in indices]
 
@@ -88,7 +111,9 @@ def build_loss_weights(config: dict[str, Any], target_columns: tuple[str, ...]) 
         return None
 
     loss_type = str(loss_cfg.get('type', 'mse'))
-    supported_loss_types = {'mse', 'mean_mse', 'weighted_mse'}
+    supported_loss_types = {'mse', 'mean_mse', 'weighted_mse', 'qm9gwbse'}
+    if loss_type == 'qm9gwbse':
+        return None
     if loss_type not in supported_loss_types:
         raise ValueError(f'Unsupported loss type: {loss_type}')
 
@@ -127,6 +152,20 @@ def build_loss_weights(config: dict[str, Any], target_columns: tuple[str, ...]) 
 def _normalize_loss_weights(config: dict[str, Any]) -> bool:
     loss_cfg = config.get('loss') or {}
     return bool(loss_cfg.get('normalize', True))
+
+
+def _training_loss(pred, target, target_columns, config, loss_weights=None, normalize=True):
+    loss_cfg = config.get('loss') or {}
+    if str(loss_cfg.get('type', 'mse')) == 'qm9gwbse':
+        return qm9gwbse_loss(
+            pred, target, target_columns,
+            energy_weight=float(loss_cfg.get('energy_weight', 1.0)),
+            oscillator_weight=float(loss_cfg.get('oscillator_weight', 1.0)),
+            gap_weight=float(loss_cfg.get('gap_weight', 0.0)),
+            ordering_weight=float(loss_cfg.get('ordering_weight', 0.0)),
+            ordering_margin=float(loss_cfg.get('ordering_margin', 0.0)),
+        )
+    return weighted_mse_loss(pred, target, loss_weights, normalize)
 
 
 def weighted_mse_loss(pred, target, loss_weights=None, normalize: bool = True):
@@ -416,6 +455,7 @@ def evaluate(
     target_columns: tuple[str, ...],
     loss_weights=None,
     normalize_loss_weights: bool = True,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {'loss': 0.0, 'n': 0}
@@ -425,7 +465,7 @@ def evaluate(
             batch = batch.to(device)
             target = batch.y.view(-1, target_dim)
             pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
-            loss = weighted_mse_loss(pred, target, loss_weights, normalize_loss_weights)
+            loss = _training_loss(pred, target, target_columns, config or {}, loss_weights, normalize_loss_weights)
             metrics = batch_mae(pred, target, target_columns)
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
@@ -476,6 +516,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     dataset_cfg = config['dataset']
     train_cfg = config['training']
     model_kwargs = dict(config['model'])
+    model_type = str(model_kwargs.pop('type', 'dimenet')).lower()
     target_columns = _target_columns_from_config(config)
     configured_out_channels = int(model_kwargs.get('out_channels', len(target_columns)))
     if configured_out_channels != len(target_columns):
@@ -505,6 +546,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     effective_hdf5_path = _copy_hdf5_to_local_scratch(dataset_cfg['hdf5_path'], dataset_cfg)
     rows = _load_manifest_rows(dataset_cfg['manifest_path'])
     manifest_ok_rows = len(rows)
+    exclude_keys_path = dataset_cfg.get('exclude_keys_path')
+    rows, excluded_manifest_rows = filter_manifest_exclusions(rows, exclude_keys_path)
     max_rows = dataset_cfg.get('max_manifest_molecules')
     if max_rows is not None:
         rows = rows[: int(max_rows)]
@@ -531,15 +574,25 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'val_fraction': float(dataset_cfg['val_fraction']),
         }
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
-    train_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx), target_columns)
-    val_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
-    test_ds = QCDGES1Dataset(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx), target_columns)
+    dataset_type = str(dataset_cfg.get('type', 'qcdge')).lower()
+    dataset_class = QM9GWBSEDataset if dataset_type in {'qm9gwbse', 'qm9-gwbse'} else QCDGES1Dataset
+    train_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx), target_columns)
+    val_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
+    test_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx), target_columns)
 
     train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True, seed=training_seed)
     val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False, seed=training_seed + 1)
     test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False, seed=training_seed + 2)
 
-    model = build_dimenetpp(**model_kwargs).to(device)
+    model_builder = build_visnet if model_type in {'visnet', 'visnet_one_pass'} else build_dimenetpp
+    model = model_builder(**model_kwargs).to(device)
+    transfer_cfg = config.get('transfer') or train_cfg.get('transfer') or {}
+    transfer_checkpoint = transfer_cfg.get('checkpoint_path')
+    if transfer_checkpoint:
+        transfer_mode = str(transfer_cfg.get('mode', 'readout_only'))
+        if model_type not in {'visnet', 'visnet_one_pass'}:
+            raise ValueError('Transfer checkpoint loading is currently implemented for ViSNet; DimeNet++ cross-architecture loading is intentionally unsupported.')
+        load_transfer_checkpoint(model, transfer_checkpoint, mode=transfer_mode, map_location=device)
     if loss_weights_tensor is not None:
         loss_weights_tensor = loss_weights_tensor.to(device)
     optimizer = torch.optim.AdamW(
@@ -573,6 +626,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'environment': collect_run_metadata(device),
         'reproducibility': reproducibility,
         'manifest_ok_rows': manifest_ok_rows,
+        'excluded_manifest_rows': excluded_manifest_rows,
+        'exclude_keys_path': str(exclude_keys_path) if exclude_keys_path else None,
         'dataset_rows_used': len(rows),
         'hdf5_path': str(dataset_cfg['hdf5_path']),
         'effective_hdf5_path': str(effective_hdf5_path),
@@ -614,7 +669,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 batch = batch.to(device)
                 target = batch.y.view(-1, len(target_columns))
                 pred = model(batch.z, batch.pos, batch.batch).view(-1, len(target_columns))
-                loss = weighted_mse_loss(pred, target, loss_weights_tensor, normalize_loss_weights)
+                loss = _training_loss(pred, target, target_columns, config, loss_weights_tensor, normalize_loss_weights)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 if max_grad_norm > 0:
@@ -628,7 +683,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             train_seconds = time.perf_counter() - train_started
 
             val_started = time.perf_counter()
-            val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights) if len(val_ds) else {'loss': float('nan')}
+            val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(val_ds) else {'loss': float('nan')}
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
@@ -702,7 +757,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             checkpoint = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
 
-        test_metrics = evaluate(model, test_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights) if len(test_ds) else {}
+        test_metrics = evaluate(model, test_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
             for subset_index, (subset_name, subset_keys) in enumerate(test_subset_key_groups.items()):
@@ -714,7 +769,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                     shuffle=False,
                     seed=training_seed + 100 + subset_index,
                 )
-                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights)
+                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
         if wandb_run.enabled and per_subset_test_metrics:
             flat_subset_metrics = {

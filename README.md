@@ -1,22 +1,19 @@
 # gnn-excited
 
-`gnn-excited` is a research codebase for predicting excited-state properties of small organic molecules with 3D graph neural networks. The initial model target is the lowest singlet excitation, using QCDGE molecular geometries and a DimeNet++ architecture.
+`gnn-excited` is a research codebase for predicting excited-state properties of small organic molecules with 3D graph neural networks. The current clean QCDGE baseline predicts paired `S1`-`S5` energy/oscillator targets; the QM9GWBSE qsGW-BSE data provides a transfer-learning target using a one-pass ViSNet encoder.
 
-The long-term goal is to explore whether learned molecular models can provide fast approximations to TD-DFT-style excited-state calculations for early-stage screening and analysis.
+The long-term goal is to explore whether learned molecular models can provide fast approximations to quantum-chemistry excited-state calculations for early-stage screening and analysis.
 
 ## Scope
 
-This repository currently focuses on the QCDGE `A_9` subset, which contains QM9-like molecules with fewer than 10 heavy atoms. The first prediction targets are:
+The primary supervised baseline is the cleaned, deduplicated QCDGE `S1`-`S5` manifest. QM9GWBSE stores five qsGW-BSE singlet/triplet excitation arrays, oscillator strengths, and transition dipoles in a compact HDF5 for leakage-safe transfer experiments. Targets include `S1_eV`-`S5_eV` and paired `log1p_S1_f`-`log1p_S5_f`.
 
-- `S1_eV`: lowest singlet excitation energy in electronvolts.
-- `S1_f`: oscillator strength for the same lowest singlet transition.
-
-Training uses the ground-state molecular geometry from QCDGE:
+Training uses ground-state molecular geometries:
 
 - atomic numbers from `ground_state/labels`
 - 3D coordinates from `ground_state/coords`
 
-Excited-state fields are used only as supervised learning targets, not as model inputs.
+Excited-state fields are used only as supervised learning targets, not as model inputs. Raw and processed datasets remain local and gitignored.
 
 ## Model Interface
 
@@ -87,6 +84,16 @@ Inspect target distributions:
 python scripts/inspect_targets.py data/processed/a9_manifest_1000.csv
 ```
 
+Build the compact QM9GWBSE HDF5, manifest, splits, checksums, and explicit QCDGE identity audit (the identity CSVs must be supplied; keys are never inferred as identities):
+
+```powershell
+python scripts/build_qm9gwbse.py `
+  --raw-dir data/raw/qm9gwbse `
+  --out-dir data/processed/qm9gwbse `
+  --identity-csv data/raw/qm9gwbse/qm9_identities.csv `
+  --qcdge-identity-csv data/raw/qm9gwbse/qcdge_final_all.csv
+```
+
 ### Full-dataset integrity audit
 
 Before training on `final_all`, reconcile the published molecule index with the HDF5 keys and target
@@ -138,6 +145,14 @@ python scripts/train_dimenet.py --config configs/overfit_16_cpu.yaml
 
 The overfit check is intended to verify the data parser, PyTorch Geometric batching, DimeNet++ forward/backward pass, optimizer, loss calculation, and checkpoint writing.
 
+Run the deterministic QM9GWBSE smoke check, then the clean QCDGE ViSNet pretrain and readout-only transfer configs:
+
+```powershell
+python scripts/train_dimenet.py --config configs/qm9gwbse_smoke_cpu.yaml
+python scripts/train_dimenet.py --config configs/final_all_s5_visnet_pretrain.yaml
+python scripts/train_dimenet.py --config configs/qm9gwbse_visnet_readout_transfer.yaml
+```
+
 Compare completed training runs:
 
 ```powershell
@@ -167,24 +182,22 @@ Example output:
 
 The current implementation includes:
 
-- lazy parsing of QCDGE HDF5 molecules
-- extraction of lowest singlet excitation energy and oscillator strength
-- processed manifest generation
-- a PyTorch Geometric dataset layer
-- a DimeNet++ training script
-- RDKit-based SMILES-to-geometry inference
-- parser, dataset, and inference smoke tests
+- clean QCDGE `S1`-`S5` manifests and deterministic leakage-safe splits
+- streaming QM9GWBSE ZIP-to-HDF5 data engineering with checksum and identity audits
+- PyTorch Geometric datasets and shared direct/gap/order losses
+- one-pass ViSNet paired energy/oscillator readouts with readout-only or full transfer loading
+- DimeNet++ training and RDKit-based SMILES-to-geometry inference
+- parser, dataset, model, loss, and training smoke tests
 
-The project is in an early validation phase. Current results should be treated as software and workflow validation, not as a benchmarked scientific model.
+The project remains in early validation. Full QCDGE pretraining and QM9GWBSE transfer runs are not yet benchmarked; current results are software and workflow validation.
 
 ## Research Directions
 
 Planned extensions include:
 
-- training and evaluating larger DimeNet++ models on expanded QCDGE subsets
-- extending targets from `S1` to fixed-count singlet and triplet manifolds
-- quantifying the effect of RDKit-generated geometries versus quantum-chemistry geometries
-- adding dataset SMILES alignment when corresponding QCDGE metadata is available
+- benchmarking clean QCDGE `S1`-`S5` pretraining and QM9GWBSE qsGW-BSE transfer
+- quantifying quantum-chemistry versus RDKit-generated geometry effects
+- extending explicit identity alignment where source metadata permits it
 - comparing direct prediction against delta machine learning approaches
 - evaluating uncertainty, calibration, and chemical-domain generalization
 

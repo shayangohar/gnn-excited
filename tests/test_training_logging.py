@@ -14,6 +14,7 @@ from gnn_excited.train import (
     build_scheduler,
     classify_validation_improvement,
     collect_run_metadata,
+    filter_manifest_exclusions,
     seed_everything,
     weighted_mse_loss,
     write_history_csv,
@@ -175,3 +176,16 @@ def test_weighted_mse_loss_normalizes_by_weight_sum() -> None:
     target = torch.tensor([[0.0, 0.0]])
 
     assert weighted_mse_loss(pred, target, (3.0, 1.0)).item() == pytest.approx(0.75)
+
+
+def test_filter_manifest_exclusions_accepts_qcdge_keys(tmp_path: Path) -> None:
+    exclusion_path = tmp_path / "qcdge_pretrain_exclusions.csv"
+    exclusion_path.write_text(
+        "qcdge_molecule_key,canonical_smiles,high_level_splits\nQ2,O,val\n",
+        encoding="utf-8",
+    )
+    rows, excluded = filter_manifest_exclusions(
+        [{"molecule_key": "Q1"}, {"molecule_key": "Q2"}], exclusion_path
+    )
+    assert excluded == 1
+    assert rows == [{"molecule_key": "Q1"}]
