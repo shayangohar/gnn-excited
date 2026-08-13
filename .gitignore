@@ -35,8 +35,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local agent/project memory
+# AI agent memory/config
 AGENT_LOG.md
+.mcp.json
+mcp.json
 .stele/
-
 wandb/
