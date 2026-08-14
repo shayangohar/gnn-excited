@@ -710,6 +710,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     try:
         for epoch in range(1, int(train_cfg['epochs']) + 1):
             epoch_started = time.perf_counter()
+            epoch_learning_rate = _current_lr(optimizer)
             train_started = time.perf_counter()
             model.train()
             total_loss = 0.0
@@ -756,7 +757,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             record = {
                 'epoch': epoch,
                 'train_loss': total_loss / max(total_n, 1),
-                'learning_rate': _current_lr(optimizer),
+                'learning_rate': epoch_learning_rate,
                 'epoch_seconds': epoch_seconds,
                 'train_seconds': train_seconds,
                 'val_seconds': val_seconds,
