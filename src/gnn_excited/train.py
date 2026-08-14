@@ -431,7 +431,12 @@ def _physical_oscillator_column(column: str) -> str | None:
     return None
 
 
-def batch_mae(pred, target, target_columns: tuple[str, ...]) -> dict[str, float]:
+def batch_mae(
+    pred,
+    target,
+    target_columns: tuple[str, ...],
+    include_physical_oscillator_metrics: bool = True,
+) -> dict[str, float]:
     metrics: dict[str, float] = {}
     energy_maes: list[float] = []
     log_osc_maes: list[float] = []
@@ -443,10 +448,14 @@ def batch_mae(pred, target, target_columns: tuple[str, ...]) -> dict[str, float]
             energy_maes.append(mae)
         physical_osc_column = _physical_oscillator_column(column)
         if physical_osc_column is not None:
-            osc_mae = (torch.expm1(pred[:, idx]).clamp_min(0) - torch.expm1(target[:, idx])).abs().mean().item()
-            metrics[f'{physical_osc_column}_mae'] = osc_mae
             log_osc_maes.append(mae)
-            osc_maes.append(osc_mae)
+            if include_physical_oscillator_metrics:
+                osc_mae = (
+                    torch.expm1(pred[:, idx].double()).clamp_min(0)
+                    - torch.expm1(target[:, idx].double())
+                ).abs().mean().item()
+                metrics[f'{physical_osc_column}_mae'] = osc_mae
+                osc_maes.append(osc_mae)
     if energy_maes:
         metrics['energy_eV_mae'] = sum(energy_maes) / len(energy_maes)
     if log_osc_maes:
@@ -486,11 +495,18 @@ def evaluate(
     target_dim = len(target_columns)
     prediction_rows: list[dict[str, Any]] = []
     energy_errors: list[float] = []
+    log_oscillator_errors: list[float] = []
     oscillator_errors: list[float] = []
     oscillator_indices = [
         index for index, column in enumerate(target_columns)
         if _physical_oscillator_column(column) is not None
     ]
+    evaluation_cfg = (config or {}).get('evaluation') or {}
+    include_physical_oscillator_metrics = bool(
+        evaluation_cfg.get('physical_oscillator_metrics', True)
+    )
+    oscillator_inverse_overflow_count = 0
+    max_float64_log = math.log(torch.finfo(torch.float64).max)
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
@@ -499,14 +515,24 @@ def evaluate(
             pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
             _require_finite(pred, 'validation predictions', batch)
             if oscillator_indices:
-                _require_finite(
-                    torch.expm1(pred[:, oscillator_indices]),
-                    'physical oscillator predictions',
-                    batch,
+                oscillator_pred = pred[:, oscillator_indices].double()
+                oscillator_inverse_overflow_count += int(
+                    (oscillator_pred > max_float64_log).sum().item()
                 )
+                if include_physical_oscillator_metrics:
+                    _require_finite(
+                        torch.expm1(oscillator_pred),
+                        'physical oscillator predictions',
+                        batch,
+                    )
             loss = _training_loss(pred, target, target_columns, config or {}, loss_weights, normalize_loss_weights)
             _require_finite(loss, 'validation loss', batch)
-            metrics = batch_mae(pred, target, target_columns)
+            metrics = batch_mae(
+                pred,
+                target,
+                target_columns,
+                include_physical_oscillator_metrics,
+            )
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
             if loss_weights is not None:
@@ -533,17 +559,23 @@ def evaluate(
                         if column.endswith('_eV'):
                             energy_errors.append(error)
                         elif _physical_oscillator_column(column) is not None:
-                            oscillator_errors.append(abs(math.expm1(prediction) - math.expm1(expected)))
+                            log_oscillator_errors.append(error)
+                            if include_physical_oscillator_metrics:
+                                oscillator_errors.append(abs(math.expm1(prediction) - math.expm1(expected)))
                     prediction_rows.append(row)
     n = max(totals.pop('n'), 1)
     metrics = {key: value if key in count_metrics else value / n for key, value in totals.items()}
     comparisons = metrics.get('ordering_comparison_count', 0.0)
     if comparisons:
         metrics['ordering_violation_rate'] = metrics['ordering_violation_count'] / comparisons
+    metrics['oscillator_strength_inverse_overflow_count'] = float(
+        oscillator_inverse_overflow_count
+    )
     if predictions_csv_path is not None:
         write_history_csv(predictions_csv_path, prediction_rows)
         for name, errors in (
             ('energy_eV_abs_error', energy_errors),
+            ('log1p_oscillator_strength_abs_error', log_oscillator_errors),
             ('oscillator_strength_abs_error', oscillator_errors),
         ):
             if errors:

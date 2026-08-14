@@ -40,6 +40,7 @@ loss:
 evaluation:
   checkpoint_path: checkpoints/visnet_faithful_qcdge_pretrain.pt
   predictions_csv_path: runs/visnet_faithful_qcdge_repair_eval.predictions.csv
+  physical_oscillator_metrics: false
 
 training:
   device: cuda

@@ -253,3 +253,36 @@ def test_evaluate_writes_predictions_and_error_quantiles(tmp_path: Path) -> None
     assert metrics["energy_eV_abs_error_max"] == pytest.approx(0.5)
     assert metrics["energy_eV_abs_error_p99"] == pytest.approx(0.5)
     assert output.read_text(encoding="utf-8").splitlines()[1].startswith("mol-1,")
+
+
+def test_evaluate_reports_log_error_when_physical_inverse_overflows(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    class Batch(SimpleNamespace):
+        def to(self, _device):
+            return self
+
+    class FixedModel(torch.nn.Module):
+        def forward(self, _z, _pos, _batch):
+            return torch.tensor([[1.5, 1_000_000.0]])
+
+    batch = Batch(
+        z=torch.tensor([1]),
+        pos=torch.zeros((1, 3)),
+        batch=torch.zeros(1, dtype=torch.long),
+        y=torch.tensor([[1.0, 0.0]]),
+        molecule_key=["pathological-molecule"],
+    )
+    metrics = evaluate(
+        FixedModel(),
+        [batch],
+        "cpu",
+        ("S1_eV", "log1p_S1_f"),
+        config={"evaluation": {"physical_oscillator_metrics": False}},
+        predictions_csv_path=tmp_path / "predictions.csv",
+    )
+
+    assert metrics["oscillator_strength_inverse_overflow_count"] == 1
+    assert metrics["log1p_oscillator_strength_mae"] == pytest.approx(1_000_000.0)
+    assert metrics["log1p_oscillator_strength_abs_error_max"] == pytest.approx(1_000_000.0)
+    assert "oscillator_strength_mae" not in metrics
