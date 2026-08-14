@@ -478,11 +478,19 @@ def evaluate(
     loss_weights=None,
     normalize_loss_weights: bool = True,
     config: dict[str, Any] | None = None,
+    predictions_csv_path: str | Path | None = None,
 ) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {'loss': 0.0, 'n': 0}
     count_metrics = {'ordering_violation_count', 'ordering_comparison_count'}
     target_dim = len(target_columns)
+    prediction_rows: list[dict[str, Any]] = []
+    energy_errors: list[float] = []
+    oscillator_errors: list[float] = []
+    oscillator_indices = [
+        index for index, column in enumerate(target_columns)
+        if _physical_oscillator_column(column) is not None
+    ]
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
@@ -490,6 +498,12 @@ def evaluate(
             _require_finite(target, 'validation targets', batch)
             pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
             _require_finite(pred, 'validation predictions', batch)
+            if oscillator_indices:
+                _require_finite(
+                    torch.expm1(pred[:, oscillator_indices]),
+                    'physical oscillator predictions',
+                    batch,
+                )
             loss = _training_loss(pred, target, target_columns, config or {}, loss_weights, normalize_loss_weights)
             _require_finite(loss, 'validation loss', batch)
             metrics = batch_mae(pred, target, target_columns)
@@ -502,11 +516,41 @@ def evaluate(
                 multiplier = 1 if key in count_metrics else batch_n
                 totals[key] = totals.get(key, 0.0) + value * multiplier
             totals['n'] += batch_n
+            if predictions_csv_path is not None:
+                pred_cpu = pred.detach().cpu()
+                target_cpu = target.detach().cpu()
+                raw_keys = getattr(batch, 'molecule_key', range(batch_n))
+                molecule_keys = [raw_keys] if isinstance(raw_keys, str) else list(raw_keys)
+                for sample_index, molecule_key in enumerate(molecule_keys):
+                    row: dict[str, Any] = {'molecule_key': molecule_key}
+                    for target_index, column in enumerate(target_columns):
+                        prediction = float(pred_cpu[sample_index, target_index])
+                        expected = float(target_cpu[sample_index, target_index])
+                        error = abs(prediction - expected)
+                        row[f'target_{column}'] = expected
+                        row[f'prediction_{column}'] = prediction
+                        row[f'abs_error_{column}'] = error
+                        if column.endswith('_eV'):
+                            energy_errors.append(error)
+                        elif _physical_oscillator_column(column) is not None:
+                            oscillator_errors.append(abs(math.expm1(prediction) - math.expm1(expected)))
+                    prediction_rows.append(row)
     n = max(totals.pop('n'), 1)
     metrics = {key: value if key in count_metrics else value / n for key, value in totals.items()}
     comparisons = metrics.get('ordering_comparison_count', 0.0)
     if comparisons:
         metrics['ordering_violation_rate'] = metrics['ordering_violation_count'] / comparisons
+    if predictions_csv_path is not None:
+        write_history_csv(predictions_csv_path, prediction_rows)
+        for name, errors in (
+            ('energy_eV_abs_error', energy_errors),
+            ('oscillator_strength_abs_error', oscillator_errors),
+        ):
+            if errors:
+                values = np.asarray(errors, dtype=np.float64)
+                metrics[f'{name}_max'] = float(values.max())
+                metrics[f'{name}_p95'] = float(np.quantile(values, 0.95))
+                metrics[f'{name}_p99'] = float(np.quantile(values, 0.99))
     return metrics
 
 def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None, total_epochs: int | None = None):
@@ -635,24 +679,43 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
 
     model_builder = build_visnet if model_type in {'visnet', 'visnet_one_pass'} else build_dimenetpp
     model = model_builder(**model_kwargs).to(device)
+    evaluation_cfg = config.get('evaluation') or {}
+    evaluation_checkpoint = evaluation_cfg.get('checkpoint_path')
     transfer_cfg = config.get('transfer') or train_cfg.get('transfer') or {}
     transfer_checkpoint = transfer_cfg.get('checkpoint_path')
+    if evaluation_checkpoint and transfer_checkpoint:
+        raise ValueError('evaluation.checkpoint_path and transfer.checkpoint_path are mutually exclusive')
     if transfer_checkpoint:
         transfer_mode = str(transfer_cfg.get('mode', 'readout_only'))
         if model_type not in {'visnet', 'visnet_one_pass'}:
             raise ValueError('Transfer checkpoint loading is currently implemented for ViSNet; DimeNet++ cross-architecture loading is intentionally unsupported.')
         load_transfer_checkpoint(model, transfer_checkpoint, mode=transfer_mode, map_location=device)
+    evaluated_checkpoint = None
+    if evaluation_checkpoint:
+        if model_type not in {'visnet', 'visnet_one_pass'}:
+            raise ValueError('Checkpoint-only evaluation is currently implemented for ViSNet')
+        evaluated_checkpoint = torch.load(evaluation_checkpoint, map_location=device)
+        load_transfer_checkpoint(model, evaluated_checkpoint, mode='full_finetune', map_location=device)
     if loss_weights_tensor is not None:
         loss_weights_tensor = loss_weights_tensor.to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(train_cfg['learning_rate']),
-        weight_decay=float(train_cfg.get('weight_decay', 0.0)),
-    )
-    scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'), int(train_cfg['epochs']))
-    history: list[dict[str, Any]] = []
+    epochs = int(train_cfg['epochs'])
+    if not evaluation_checkpoint and epochs < 1:
+        raise ValueError('training.epochs must be positive unless evaluation.checkpoint_path is set')
+    optimizer = None
+    scheduler = None
+    if not evaluation_checkpoint:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=float(train_cfg['learning_rate']),
+            weight_decay=float(train_cfg.get('weight_decay', 0.0)),
+        )
+        scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'), epochs)
+    history: list[dict[str, Any]] = list((evaluated_checkpoint or {}).get('history') or [])
     best_val = math.inf
-    best_epoch: int | None = None
+    best_epoch: int | None = int(history[-1]['epoch']) if history and 'epoch' in history[-1] else None
+    historical_val_losses = [float(record['val_loss']) for record in history if 'val_loss' in record]
+    if historical_val_losses:
+        best_val = min(historical_val_losses)
     early_stopping_best_val = math.inf
     min_delta = float(train_cfg.get('early_stopping_min_delta', 0.0))
     early_stopping_patience = train_cfg.get('early_stopping_patience')
@@ -677,6 +740,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'manifest_ok_rows': manifest_ok_rows,
         'excluded_manifest_rows': excluded_manifest_rows,
         'exclude_keys_path': str(exclude_keys_path) if exclude_keys_path else None,
+        'evaluation_checkpoint_path': str(evaluation_checkpoint) if evaluation_checkpoint else None,
         'dataset_rows_used': len(rows),
         'hdf5_path': str(dataset_cfg['hdf5_path']),
         'effective_hdf5_path': str(effective_hdf5_path),
@@ -692,9 +756,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'normalize': normalize_loss_weights,
         },
         'config': config,
-        'best_epoch': None,
-        'best_val_loss': None,
-        'latest_epoch': 0,
+        'best_epoch': best_epoch,
+        'best_val_loss': best_val if math.isfinite(best_val) else None,
+        'latest_epoch': best_epoch or 0,
         'latest_metrics': None,
         'test_metrics': None,
         'stopped_early': False,
@@ -708,7 +772,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
 
     failed = False
     try:
-        for epoch in range(1, int(train_cfg['epochs']) + 1):
+        for epoch in range(1, epochs + 1):
             epoch_started = time.perf_counter()
             epoch_learning_rate = _current_lr(optimizer)
             train_started = time.perf_counter()
@@ -818,11 +882,21 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 write_summary_json(summary_json_path, run_summary)
                 break
 
-        if best_epoch is not None and checkpoint_path.exists():
+        if not evaluation_checkpoint and best_epoch is not None and checkpoint_path.exists():
             checkpoint = torch.load(checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
 
-        test_metrics = evaluate(model, test_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(test_ds) else {}
+        predictions_csv_path = evaluation_cfg.get('predictions_csv_path')
+        test_metrics = evaluate(
+            model,
+            test_loader,
+            device,
+            target_columns,
+            loss_weights_tensor,
+            normalize_loss_weights,
+            config,
+            predictions_csv_path=predictions_csv_path,
+        ) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
             for subset_index, (subset_name, subset_keys) in enumerate(test_subset_key_groups.items()):
@@ -852,6 +926,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 'stop_reason': stop_reason,
                 'test_metrics': test_metrics,
                 'per_subset_test_metrics': per_subset_test_metrics,
+                'predictions_csv_path': str(predictions_csv_path) if predictions_csv_path else None,
             }
         )
         write_summary_json(summary_json_path, run_summary)

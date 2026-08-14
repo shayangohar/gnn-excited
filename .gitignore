@@ -41,3 +41,4 @@ AGENT_LOG.md
 mcp.json
 .stele/
 wandb/
+tmp/

@@ -15,6 +15,7 @@ from gnn_excited.train import (
     build_scheduler,
     classify_validation_improvement,
     collect_run_metadata,
+    evaluate,
     filter_manifest_exclusions,
     seed_everything,
     weighted_mse_loss,
@@ -219,3 +220,36 @@ def test_filter_manifest_exclusions_accepts_qcdge_keys(tmp_path: Path) -> None:
     )
     assert excluded == 1
     assert rows == [{"molecule_key": "Q1"}]
+
+
+def test_evaluate_writes_predictions_and_error_quantiles(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    class Batch(SimpleNamespace):
+        def to(self, _device):
+            return self
+
+    class FixedModel(torch.nn.Module):
+        def forward(self, _z, _pos, _batch):
+            return torch.tensor([[1.5, 0.0]])
+
+    output = tmp_path / "predictions.csv"
+    batch = Batch(
+        z=torch.tensor([1]),
+        pos=torch.zeros((1, 3)),
+        batch=torch.zeros(1, dtype=torch.long),
+        y=torch.tensor([[1.0, 0.0]]),
+        molecule_key=["mol-1"],
+    )
+
+    metrics = evaluate(
+        FixedModel(),
+        [batch],
+        "cpu",
+        ("S1_eV", "log1p_S1_f"),
+        predictions_csv_path=output,
+    )
+
+    assert metrics["energy_eV_abs_error_max"] == pytest.approx(0.5)
+    assert metrics["energy_eV_abs_error_p99"] == pytest.approx(0.5)
+    assert output.read_text(encoding="utf-8").splitlines()[1].startswith("mol-1,")
