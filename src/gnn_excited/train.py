@@ -420,9 +420,9 @@ class WandbRun:
             return
         self._wandb.log(metrics)
 
-    def finish(self) -> None:
+    def finish(self, exit_code: int = 0) -> None:
         if self._wandb is not None:
-            self._wandb.finish()
+            self._wandb.finish(exit_code=exit_code)
 
 
 def _physical_oscillator_column(column: str) -> str | None:
@@ -706,6 +706,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         run_summary['wandb'] = wandb_run.metadata()
         write_summary_json(summary_json_path, run_summary)
 
+    failed = False
     try:
         for epoch in range(1, int(train_cfg['epochs']) + 1):
             epoch_started = time.perf_counter()
@@ -724,10 +725,14 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 _require_finite(loss, 'training loss', batch)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=max_grad_norm if max_grad_norm > 0 else math.inf,
-                    error_if_nonfinite=True,
-                )
+                try:
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), max_norm=max_grad_norm if max_grad_norm > 0 else math.inf,
+                        error_if_nonfinite=True,
+                    )
+                except RuntimeError as exc:
+                    keys = getattr(batch, 'molecule_key', None)
+                    raise FloatingPointError(f'Non-finite training gradient norm; molecule_keys={keys}') from exc
                 optimizer.step()
                 batch_n = target.shape[0]
                 total_loss += loss.item() * batch_n
@@ -857,6 +862,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'summary_json_path': str(summary_json_path),
         }
     except Exception as exc:
+        failed = True
         run_summary.update(
             {
                 'status': 'failed',
@@ -867,4 +873,4 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         write_summary_json(summary_json_path, run_summary)
         raise
     finally:
-        wandb_run.finish()
+        wandb_run.finish(exit_code=1 if failed else 0)
