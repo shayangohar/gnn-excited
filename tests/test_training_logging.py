@@ -4,6 +4,7 @@ import csv
 import json
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -99,6 +100,23 @@ def test_build_scheduler_supports_reduce_on_plateau() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(0.005)
 
 
+def test_build_scheduler_warms_up_then_decays() -> None:
+    torch = pytest.importorskip("torch")
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=3e-4)
+    scheduler = build_scheduler(
+        optimizer,
+        {"type": "warmup_cosine", "warmup_epochs": 2, "start_factor": 1 / 300, "min_lr": 1e-5},
+        total_epochs=6,
+    )
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-6)
+    scheduler.step()
+    assert optimizer.param_groups[0]["lr"] > 1e-6
+    scheduler.step()
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(3e-4)
+
+
 def test_build_scheduler_rejects_unknown_type() -> None:
     torch = pytest.importorskip("torch")
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
@@ -120,6 +138,15 @@ def test_validation_improvement_separates_checkpoint_from_early_stopping() -> No
     assert improvement["early_stopping_improved"] is False
 
 
+def test_nonfinite_guard_reports_molecule_keys() -> None:
+    torch = pytest.importorskip("torch")
+    from gnn_excited.train import _require_finite
+
+    batch = SimpleNamespace(molecule_key=["bad-molecule"])
+    with pytest.raises(FloatingPointError, match="bad-molecule"):
+        _require_finite(torch.tensor([float("nan")]), "training loss", batch)
+
+
 def test_wandb_run_disabled_without_importing_wandb() -> None:
     run = WandbRun({"wandb": {"enabled": False}}, {"config_path": "config.yaml"})
 
@@ -139,6 +166,9 @@ def test_batch_mae_reports_multistate_metrics() -> None:
     assert metrics['S2_eV_mae'] == pytest.approx(2.0)
     assert metrics['energy_eV_mae'] == pytest.approx(1.5)
     assert metrics['oscillator_strength_mae'] == pytest.approx(0.0)
+    assert metrics['adjacent_gap_eV_mae'] == pytest.approx(3.0)
+    assert metrics['ordering_violation_count'] == 0
+    assert metrics['ordering_comparison_count'] == 1
 
 
 def test_build_loss_weights_supports_energy_oscillator_defaults() -> None:

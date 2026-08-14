@@ -43,6 +43,9 @@ def test_visnet_one_pass_shape_backprop_and_frozen_encoder() -> None:
     output = model(z, pos, batch)
     assert output.shape == (1, 4)
     output.sum().backward()
+    assert model.reduce_op == "mean"
+    vector_projection = model.energy_head.output_network[0].vec1_proj.weight
+    assert vector_projection.grad is not None
     assert any(parameter.grad is not None for parameter in model.parameters() if parameter.requires_grad)
 
     checkpoint = {"model_state_dict": model.state_dict()}

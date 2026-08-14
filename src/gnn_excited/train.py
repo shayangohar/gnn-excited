@@ -183,6 +183,14 @@ def weighted_mse_loss(pred, target, loss_weights=None, normalize: bool = True):
     return squared_error.mean()
 
 
+def _require_finite(value, name: str, batch=None) -> None:
+    if torch.isfinite(value).all():
+        return
+    keys = getattr(batch, 'molecule_key', None)
+    key_text = f'; molecule_keys={list(keys) if isinstance(keys, (list, tuple)) else keys}' if keys is not None else ''
+    raise FloatingPointError(f'Non-finite {name}{key_text}')
+
+
 def _source_subset_from_key(molecule_key: str) -> str:
     prefix = ''.join(ch for ch in str(molecule_key) if ch.isalpha())
     return {
@@ -445,6 +453,20 @@ def batch_mae(pred, target, target_columns: tuple[str, ...]) -> dict[str, float]
         metrics['log1p_oscillator_strength_mae'] = sum(log_osc_maes) / len(log_osc_maes)
     if osc_maes:
         metrics['oscillator_strength_mae'] = sum(osc_maes) / len(osc_maes)
+    energy_indices = [index for index, column in enumerate(target_columns) if column.endswith('_eV')]
+    if len(energy_indices) > 1:
+        pred_energy = pred[:, energy_indices]
+        target_energy = target[:, energy_indices]
+        pred_gaps = pred_energy[:, 1:] - pred_energy[:, :-1]
+        target_gaps = target_energy[:, 1:] - target_energy[:, :-1]
+        gap_errors = (pred_gaps - target_gaps).abs()
+        metrics['adjacent_gap_eV_mae'] = gap_errors.mean().item()
+        metrics['ordering_violation_count'] = float((pred_gaps <= 0).sum().item())
+        metrics['ordering_comparison_count'] = float(pred_gaps.numel())
+        for gap_index, (left_index, right_index) in enumerate(zip(energy_indices[:-1], energy_indices[1:])):
+            left = target_columns[left_index].removesuffix('_eV')
+            right = target_columns[right_index].removesuffix('_eV')
+            metrics[f'{left}_{right}_gap_eV_mae'] = gap_errors[:, gap_index].mean().item()
     return metrics
 
 
@@ -459,13 +481,17 @@ def evaluate(
 ) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {'loss': 0.0, 'n': 0}
+    count_metrics = {'ordering_violation_count', 'ordering_comparison_count'}
     target_dim = len(target_columns)
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
             target = batch.y.view(-1, target_dim)
+            _require_finite(target, 'validation targets', batch)
             pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
+            _require_finite(pred, 'validation predictions', batch)
             loss = _training_loss(pred, target, target_columns, config or {}, loss_weights, normalize_loss_weights)
+            _require_finite(loss, 'validation loss', batch)
             metrics = batch_mae(pred, target, target_columns)
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
@@ -473,17 +499,40 @@ def evaluate(
                 unweighted_loss = weighted_mse_loss(pred, target)
                 totals['unweighted_mse_loss'] = totals.get('unweighted_mse_loss', 0.0) + unweighted_loss.item() * batch_n
             for key, value in metrics.items():
-                totals[key] = totals.get(key, 0.0) + value * batch_n
+                multiplier = 1 if key in count_metrics else batch_n
+                totals[key] = totals.get(key, 0.0) + value * multiplier
             totals['n'] += batch_n
     n = max(totals.pop('n'), 1)
-    return {key: value / n for key, value in totals.items()}
+    metrics = {key: value if key in count_metrics else value / n for key, value in totals.items()}
+    comparisons = metrics.get('ordering_comparison_count', 0.0)
+    if comparisons:
+        metrics['ordering_violation_rate'] = metrics['ordering_violation_count'] / comparisons
+    return metrics
 
-def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None):
+def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None, total_epochs: int | None = None):
     if not scheduler_cfg:
         return None
     scheduler_type = scheduler_cfg.get('type')
     if scheduler_type in (None, 'none'):
         return None
+    if scheduler_type == 'warmup_cosine':
+        if total_epochs is None:
+            raise ValueError('warmup_cosine scheduler requires total_epochs')
+        warmup_epochs = int(scheduler_cfg.get('warmup_epochs', 5))
+        if not 0 < warmup_epochs < total_epochs:
+            raise ValueError('warmup_epochs must be between 1 and total_epochs - 1')
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=float(scheduler_cfg.get('start_factor', 1.0 / 300.0)),
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_epochs - warmup_epochs,
+            eta_min=float(scheduler_cfg.get('min_lr', 1e-5)),
+        )
+        return torch.optim.lr_scheduler.SequentialLR(optimizer, [warmup, cosine], [warmup_epochs])
     if scheduler_type != 'reduce_on_plateau':
         raise ValueError(f'Unsupported scheduler type: {scheduler_type}')
     return torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -600,7 +649,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         lr=float(train_cfg['learning_rate']),
         weight_decay=float(train_cfg.get('weight_decay', 0.0)),
     )
-    scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'))
+    scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'), int(train_cfg['epochs']))
     history: list[dict[str, Any]] = []
     best_val = math.inf
     best_epoch: int | None = None
@@ -668,12 +717,17 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             for batch in train_loader:
                 batch = batch.to(device)
                 target = batch.y.view(-1, len(target_columns))
+                _require_finite(target, 'training targets', batch)
                 pred = model(batch.z, batch.pos, batch.batch).view(-1, len(target_columns))
+                _require_finite(pred, 'training predictions', batch)
                 loss = _training_loss(pred, target, target_columns, config, loss_weights_tensor, normalize_loss_weights)
+                _require_finite(loss, 'training loss', batch)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                if max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=max_grad_norm if max_grad_norm > 0 else math.inf,
+                    error_if_nonfinite=True,
+                )
                 optimizer.step()
                 batch_n = target.shape[0]
                 total_loss += loss.item() * batch_n
@@ -687,8 +741,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
-            if scheduler is not None and math.isfinite(val_loss):
-                scheduler.step(val_loss)
+            if not math.isfinite(val_loss):
+                raise FloatingPointError(f'Non-finite validation loss at epoch {epoch}')
+            if scheduler is not None:
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(val_loss)
+                else:
+                    scheduler.step()
             record = {
                 'epoch': epoch,
                 'train_loss': total_loss / max(total_n, 1),
@@ -797,5 +856,15 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'metrics_csv_path': str(metrics_csv_path),
             'summary_json_path': str(summary_json_path),
         }
+    except Exception as exc:
+        run_summary.update(
+            {
+                'status': 'failed',
+                'updated_at': _utc_now(),
+                'stop_reason': f'{type(exc).__name__}: {exc}',
+            }
+        )
+        write_summary_json(summary_json_path, run_summary)
+        raise
     finally:
         wandb_run.finish()

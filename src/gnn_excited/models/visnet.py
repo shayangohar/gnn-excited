@@ -9,11 +9,13 @@ try:
     import torch
     from torch import nn
     from torch_geometric.nn.models import ViSNet
+    from torch_geometric.nn.models.visnet import GatedEquivariantBlock
     from torch_geometric.utils import scatter
 except ModuleNotFoundError as exc:  # pragma: no cover - optional ML dependency.
     torch = None
     nn = None
     ViSNet = None
+    GatedEquivariantBlock = None
     scatter = None
     _IMPORT_ERROR = exc
 else:
@@ -23,6 +25,27 @@ from gnn_excited.losses import target_layout
 
 
 if nn is not None:
+
+    class MultiTargetEquivariantScalar(nn.Module):
+        """ViSNet's gated scalar output extended to multiple targets."""
+
+        def __init__(self, hidden_channels: int, out_channels: int):
+            super().__init__()
+            self.output_network = nn.ModuleList(
+                [
+                    GatedEquivariantBlock(
+                        hidden_channels,
+                        hidden_channels // 2,
+                        scalar_activation=True,
+                    ),
+                    GatedEquivariantBlock(hidden_channels // 2, out_channels),
+                ]
+            )
+
+        def forward(self, scalar, vector):
+            for layer in self.output_network:
+                scalar, vector = layer(scalar, vector)
+            return scalar + vector.sum() * 0
 
     class ViSNetOnePass(nn.Module):
         """Evaluate one shared ViSNet encoder, then split energy/oscillator heads."""
@@ -38,9 +61,10 @@ if nn is not None:
             if "layers" in encoder_kwargs and "num_layers" not in encoder_kwargs:
                 encoder_kwargs["num_layers"] = encoder_kwargs.pop("layers")
             encoder_kwargs["hidden_channels"] = self.hidden_channels
-            self.encoder = ViSNet(**encoder_kwargs)
-            self.energy_head = nn.Linear(self.hidden_channels, len(self.energy_indices))
-            self.oscillator_head = nn.Linear(self.hidden_channels, len(self.oscillator_indices))
+            self.reduce_op = str(encoder_kwargs.pop("reduce_op", "mean"))
+            self.encoder = ViSNet(**encoder_kwargs).representation_model
+            self.energy_head = MultiTargetEquivariantScalar(self.hidden_channels, len(self.energy_indices))
+            self.oscillator_head = MultiTargetEquivariantScalar(self.hidden_channels, len(self.oscillator_indices))
 
         @property
         def energy_readout(self):
@@ -53,16 +77,10 @@ if nn is not None:
         def forward(self, z, pos, batch=None):
             if batch is None:
                 batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
-            representation = getattr(self.encoder, "representation_model", None)
-            if representation is None:
-                representation = getattr(self.encoder, "representation", None)
-            if representation is None:
-                raise RuntimeError("Installed PyG ViSNet has no representation_model; cannot expose a shared readout")
-            embedding, _ = representation(z, pos, batch)
-            embedding = scatter(embedding, batch, dim=0, reduce=getattr(self.encoder, "reduce_op", "sum"))
-            energy = self.energy_head(embedding)
-            oscillator = self.oscillator_head(embedding)
-            output = embedding.new_empty((embedding.size(0), len(self.target_columns)))
+            scalar, vector = self.encoder(z, pos, batch)
+            energy = scatter(self.energy_head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
+            oscillator = scatter(self.oscillator_head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
+            output = scalar.new_empty((energy.size(0), len(self.target_columns)))
             output[:, list(self.energy_indices)] = energy
             output[:, list(self.oscillator_indices)] = oscillator
             return output

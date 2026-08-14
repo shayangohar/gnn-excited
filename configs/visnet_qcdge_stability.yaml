@@ -13,8 +13,9 @@ dataset:
   split_path: data/processed/qcdge_audit/splits.csv
   split_column: random_split
   exclude_keys_path: data/processed/qm9gwbse/qcdge_pretrain_exclusions.csv
-  local_copy: true
-  report_subset_metrics: true
+  local_copy: false
+  report_subset_metrics: false
+  max_manifest_molecules: 20000
   split_seed: 17
 
 targets:
@@ -40,7 +41,7 @@ loss:
 training:
   device: cuda
   seed: 17
-  epochs: 50
+  epochs: 6
   batch_size: 16
   learning_rate: 0.0003
   weight_decay: 0.001
@@ -55,19 +56,9 @@ training:
     warmup_epochs: 5
     start_factor: 0.0033333333333333335
     min_lr: 0.00001
-  checkpoint_path: checkpoints/visnet_faithful_qcdge_pretrain.pt
-  metrics_csv_path: runs/visnet_faithful_qcdge_pretrain.metrics.csv
-  summary_json_path: runs/visnet_faithful_qcdge_pretrain.summary.json
+  checkpoint_path: checkpoints/visnet_qcdge_stability.pt
+  metrics_csv_path: runs/visnet_qcdge_stability.metrics.csv
+  summary_json_path: runs/visnet_qcdge_stability.summary.json
 
 wandb:
-  enabled: true
-  entity: shayangohar2007-fresno-state
-  project: gnn-excited
-  name: visnet_faithful_qcdge_pretrain
-  group: qcdge-qm9gwbse-transfer
-  tags:
-    - QCDGE-full
-    - S1-S5
-    - ViSNet
-    - leakage-safe
-    - pretraining
+  enabled: false
