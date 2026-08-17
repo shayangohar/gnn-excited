@@ -501,8 +501,20 @@ class QM9GWBSEDataset(Dataset):
 
     def get(self, idx: int):
         row = self.rows[idx]
-        group = self._handle()[row["molecule_key"]]["ground_state"]
-        z = torch.as_tensor(np.asarray(group["labels"][()], dtype=np.int64), dtype=torch.long).view(-1)
-        pos = torch.as_tensor(np.asarray(group["coords"][()], dtype=np.float32), dtype=torch.float32)
+        molecule = self._handle()[row["molecule_key"]]
+        ground = molecule["ground_state"]
+        z = torch.as_tensor(np.asarray(ground["labels"][()], dtype=np.int64), dtype=torch.long).view(-1)
+        pos = torch.as_tensor(np.asarray(ground["coords"][()], dtype=np.float32), dtype=torch.float32)
+        transition_dipole = torch.as_tensor(
+            np.asarray(molecule["excited_state"]["trans_dip_mom_D"][()], dtype=np.float32),
+            dtype=torch.float32,
+        )
         y = torch.tensor([[float(row[column]) for column in self.target_columns]], dtype=torch.float32)
-        return Data(z=z, pos=pos, y=y, molecule_key=row["molecule_key"], qm9_id=row["qm9_id"])
+        return Data(
+            z=z,
+            pos=pos,
+            y=y,
+            transition_dipole=transition_dipole,
+            molecule_key=row["molecule_key"],
+            qm9_id=row["qm9_id"],
+        )

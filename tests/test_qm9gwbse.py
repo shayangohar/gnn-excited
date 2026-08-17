@@ -43,6 +43,16 @@ def test_build_qm9gwbse_streams_zip_members_and_validates_targets(tmp_path: Path
     assert {row["random_split"] for row in rows} == {"train", "test"}
     assert (out / "qcdge_audit.csv").exists() is False
 
+    pytest.importorskip("torch_geometric")
+    from gnn_excited.data.qm9gwbse import QM9GWBSEDataset
+
+    dataset = QM9GWBSEDataset(
+        result["hdf5"],
+        out / "manifest.csv",
+        target_columns=("S1_eV", "log1p_S1_f"),
+    )
+    assert dataset[0].transition_dipole.shape == (5, 3)
+
 
 def test_qcdge_pretrain_exclusions_only_include_qm9_val_test_identities() -> None:
     rows = [

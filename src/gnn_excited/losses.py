@@ -58,6 +58,16 @@ def gap_ordering_loss(
     }
 
 
+def phase_invariant_vector_squared_error(prediction, target):
+    """Squared vector error invariant to the arbitrary electronic-state phase."""
+    if prediction.shape != target.shape or prediction.ndim != 3 or prediction.shape[-1] != 3:
+        raise ValueError("dipole prediction and target must have shape (batch, states, 3)")
+    return torch.minimum(
+        (prediction - target).pow(2).sum(dim=-1),
+        (prediction + target).pow(2).sum(dim=-1),
+    )
+
+
 def qm9gwbse_loss(
     prediction,
     target,
@@ -68,9 +78,12 @@ def qm9gwbse_loss(
     gap_weight: float = 0.0,
     ordering_weight: float = 0.0,
     ordering_margin: float = 0.0,
+    predicted_dipoles=None,
+    target_dipoles=None,
+    dipole_weight: float = 0.0,
     return_components: bool = False,
 ):
-    """Direct paired-property MSE plus optional adjacent-gap/order terms."""
+    """Paired-property loss with optional phase-invariant transition dipoles."""
     if torch is None:  # pragma: no cover
         raise ModuleNotFoundError("qm9gwbse_loss requires torch")
     if prediction.ndim != 2 or target.shape != prediction.shape:
@@ -86,9 +99,16 @@ def qm9gwbse_loss(
         ordering_weight=ordering_weight,
         ordering_margin=ordering_margin,
     )
+    if float(dipole_weight):
+        if predicted_dipoles is None or target_dipoles is None:
+            raise ValueError("non-zero dipole_weight requires predicted_dipoles and target_dipoles")
+        dipole = phase_invariant_vector_squared_error(predicted_dipoles, target_dipoles).mean()
+    else:
+        dipole = prediction.new_zeros(())
     components = {
         "energy_mse": direct_energy,
         "oscillator_mse": direct_oscillator,
+        "transition_dipole_phase_invariant_mse": dipole,
         **gap_terms,
     }
     total = (
@@ -96,6 +116,7 @@ def qm9gwbse_loss(
         + float(oscillator_weight) * direct_oscillator
         + gap_terms["energy_gap_mse"]
         + gap_terms["energy_order_penalty"]
+        + float(dipole_weight) * dipole
     )
     components["total"] = total
     return components if return_components else total

@@ -55,3 +55,60 @@ def test_visnet_one_pass_shape_backprop_and_frozen_encoder() -> None:
     assert torch.equal(restored.state_dict()[encoder_key], encoder_weight)
     assert all(not parameter.requires_grad for parameter in restored.encoder.parameters())
     assert any(parameter.requires_grad for parameter in restored.energy_head.parameters())
+
+
+def test_spectroscopy_decoder_physics_phase_loss_and_encoder_transfer() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.losses import qm9gwbse_loss
+    from gnn_excited.models.visnet import OSCILLATOR_STRENGTH_FACTOR, build_visnet, load_transfer_checkpoint
+
+    columns = tuple(
+        column
+        for state in range(1, 6)
+        for column in (f"S{state}_eV", f"log1p_S{state}_f")
+    )
+    kwargs = {
+        "target_columns": columns,
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    pretrained = build_visnet(**kwargs)
+    model = build_visnet(**kwargs, spectroscopy_decoder=True)
+    load_transfer_checkpoint(
+        model,
+        {"model_state_dict": pretrained.state_dict()},
+        mode="encoder_finetune",
+    )
+    encoder_key = next(key for key in pretrained.state_dict() if key.startswith("encoder."))
+    assert torch.equal(model.state_dict()[encoder_key], pretrained.state_dict()[encoder_key])
+
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    prediction, dipoles = model(z, pos, torch.zeros(3, dtype=torch.long))
+    assert prediction.shape == (1, 10)
+    assert dipoles.shape == (1, 5, 3)
+    expected_log_f = torch.log1p(
+        OSCILLATOR_STRENGTH_FACTOR
+        * prediction[:, 0::2].clamp_min(0)
+        * dipoles.pow(2).sum(dim=-1)
+    )
+    assert torch.allclose(prediction[:, 1::2], expected_log_f)
+
+    target = prediction.detach().clone()
+    target_dipoles = -dipoles.detach()
+    terms = qm9gwbse_loss(
+        prediction,
+        target,
+        columns,
+        predicted_dipoles=dipoles,
+        target_dipoles=target_dipoles,
+        dipole_weight=1.0,
+        return_components=True,
+    )
+    assert terms["transition_dipole_phase_invariant_mse"].item() == pytest.approx(0.0, abs=1e-8)
+    terms["total"].backward()
+    assert model.state_queries.weight.grad is not None

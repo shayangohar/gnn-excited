@@ -1,4 +1,4 @@
-"""One-pass ViSNet transfer model for paired QM9GWBSE targets."""
+"""One-pass ViSNet models for paired QM9GWBSE targets."""
 
 from __future__ import annotations
 
@@ -22,6 +22,11 @@ else:
     _IMPORT_ERROR = None
 
 from gnn_excited.losses import target_layout
+
+
+DEBYE_TO_ATOMIC_UNITS = 0.393430307
+EV_PER_HARTREE = 27.211386245988
+OSCILLATOR_STRENGTH_FACTOR = (2.0 / 3.0) * DEBYE_TO_ATOMIC_UNITS**2 / EV_PER_HARTREE
 
 
 if nn is not None:
@@ -94,11 +99,72 @@ if nn is not None:
                 parameter.requires_grad_(True)
 
 
+    class ViSNetSpectroscopyDecoder(ViSNetOnePass):
+        """Decode five queried excited states from one shared ViSNet encoding."""
+
+        def __init__(
+            self,
+            target_columns: Sequence[str],
+            hidden_channels: int = 128,
+            num_states: int = 5,
+            dipole_reduce_op: str = "sum",
+            **kwargs: Any,
+        ):
+            super().__init__(target_columns, hidden_channels, **kwargs)
+            if len(self.energy_indices) != num_states or len(self.oscillator_indices) != num_states:
+                raise ValueError(
+                    f"Spectroscopy decoder requires {num_states} paired energy/oscillator states"
+                )
+            del self.energy_head, self.oscillator_head
+            self.num_states = int(num_states)
+            self.dipole_reduce_op = str(dipole_reduce_op)
+            self.state_queries = nn.Embedding(self.num_states, self.hidden_channels)
+            self.state_decoder = nn.ModuleList(
+                [
+                    GatedEquivariantBlock(
+                        self.hidden_channels,
+                        self.hidden_channels // 2,
+                        scalar_activation=True,
+                    ),
+                    GatedEquivariantBlock(self.hidden_channels // 2, 1),
+                ]
+            )
+
+        def forward(self, z, pos, batch=None):
+            if batch is None:
+                batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            scalar, vector = self.encoder(z, pos, batch)
+            energies = []
+            dipoles = []
+            for query in self.state_queries.weight:
+                state_scalar = scalar + query
+                state_vector = vector
+                for layer in self.state_decoder:
+                    state_scalar, state_vector = layer(state_scalar, state_vector)
+                energies.append(scatter(state_scalar, batch, dim=0, reduce=self.reduce_op).squeeze(-1))
+                dipoles.append(
+                    scatter(state_vector, batch, dim=0, reduce=self.dipole_reduce_op).squeeze(-1)
+                )
+            energy = torch.stack(energies, dim=1)
+            transition_dipole = torch.stack(dipoles, dim=1)
+            oscillator = (
+                OSCILLATOR_STRENGTH_FACTOR
+                * energy.clamp_min(0)
+                * transition_dipole.pow(2).sum(dim=-1)
+            )
+            output = scalar.new_empty((energy.size(0), len(self.target_columns)))
+            output[:, list(self.energy_indices)] = energy
+            output[:, list(self.oscillator_indices)] = torch.log1p(oscillator)
+            return output, transition_dipole
+
+
 else:
 
     class ViSNetOnePass:  # pragma: no cover
         def __init__(self, *args, **kwargs):
             raise ModuleNotFoundError("ViSNetOnePass requires torch and torch_geometric") from _IMPORT_ERROR
+
+    ViSNetSpectroscopyDecoder = ViSNetOnePass
 
 
 def build_visnet(**kwargs: Any):
@@ -107,7 +173,8 @@ def build_visnet(**kwargs: Any):
     target_columns = kwargs.pop("target_columns", None)
     if target_columns is None:
         raise ValueError("build_visnet requires target_columns")
-    return ViSNetOnePass(target_columns=target_columns, **kwargs)
+    model_class = ViSNetSpectroscopyDecoder if kwargs.pop("spectroscopy_decoder", False) else ViSNetOnePass
+    return model_class(target_columns=target_columns, **kwargs)
 
 
 def _checkpoint_state(checkpoint: str | Path | dict[str, Any], map_location: str | torch.device = "cpu") -> dict[str, Any]:
@@ -128,13 +195,32 @@ def load_transfer_checkpoint(
     mode: str = "readout_only",
     map_location: str | torch.device = "cpu",
 ) -> ViSNetOnePass:
-    """Load a same-architecture checkpoint in frozen-readout or full mode."""
+    """Load a full compatible checkpoint or initialize only the shared encoder."""
     if _IMPORT_ERROR is not None:
         raise ModuleNotFoundError("Checkpoint loading requires torch and torch_geometric") from _IMPORT_ERROR
-    mode = {"readout": "readout_only", "frozen_readout": "readout_only", "full": "full_finetune", "finetune": "full_finetune"}.get(str(mode).lower(), str(mode).lower())
-    if mode not in {"readout_only", "full_finetune"}:
-        raise ValueError("transfer mode must be readout_only or full_finetune")
+    mode = {
+        "readout": "readout_only",
+        "frozen_readout": "readout_only",
+        "full": "full_finetune",
+        "finetune": "full_finetune",
+        "encoder_only": "encoder_finetune",
+    }.get(str(mode).lower(), str(mode).lower())
+    if mode not in {"readout_only", "full_finetune", "encoder_finetune"}:
+        raise ValueError("transfer mode must be readout_only, full_finetune, or encoder_finetune")
     state = _checkpoint_state(checkpoint, map_location)
+    if mode == "encoder_finetune":
+        encoder_state = {key: value for key, value in state.items() if key.startswith("encoder.")}
+        if not encoder_state:
+            raise ValueError("Checkpoint does not contain encoder.* parameters")
+        missing, unexpected = model.load_state_dict(encoder_state, strict=False)
+        missing_encoder = [key for key in missing if key.startswith("encoder.")]
+        if missing_encoder or unexpected:
+            raise ValueError(
+                f"Incompatible ViSNet encoder checkpoint: missing={sorted(missing_encoder)}, "
+                f"unexpected={sorted(unexpected)}"
+            )
+        model.unfreeze_encoder()
+        return model
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing or unexpected:
         raise ValueError(f"Incompatible ViSNet checkpoint: missing={sorted(missing)}, unexpected={sorted(unexpected)}")

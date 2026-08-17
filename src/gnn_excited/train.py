@@ -31,7 +31,7 @@ from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, ex
 from gnn_excited.data.qm9gwbse import QM9GWBSEDataset
 from gnn_excited.models.dimenetpp import build_dimenetpp
 from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
-from gnn_excited.losses import qm9gwbse_loss
+from gnn_excited.losses import phase_invariant_vector_squared_error, qm9gwbse_loss
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -154,7 +154,16 @@ def _normalize_loss_weights(config: dict[str, Any]) -> bool:
     return bool(loss_cfg.get('normalize', True))
 
 
-def _training_loss(pred, target, target_columns, config, loss_weights=None, normalize=True):
+def _training_loss(
+    pred,
+    target,
+    target_columns,
+    config,
+    loss_weights=None,
+    normalize=True,
+    predicted_dipoles=None,
+    target_dipoles=None,
+):
     loss_cfg = config.get('loss') or {}
     if str(loss_cfg.get('type', 'mse')) == 'qm9gwbse':
         return qm9gwbse_loss(
@@ -164,8 +173,21 @@ def _training_loss(pred, target, target_columns, config, loss_weights=None, norm
             gap_weight=float(loss_cfg.get('gap_weight', 0.0)),
             ordering_weight=float(loss_cfg.get('ordering_weight', 0.0)),
             ordering_margin=float(loss_cfg.get('ordering_margin', 0.0)),
+            predicted_dipoles=predicted_dipoles,
+            target_dipoles=target_dipoles,
+            dipole_weight=float(loss_cfg.get('dipole_weight', 0.0)),
         )
     return weighted_mse_loss(pred, target, loss_weights, normalize)
+
+
+def _forward_model(model, batch, target_dim: int):
+    output = model(batch.z, batch.pos, batch.batch)
+    if isinstance(output, tuple):
+        prediction, transition_dipoles = output
+        transition_dipoles = transition_dipoles.view(prediction.shape[0], -1, 3)
+    else:
+        prediction, transition_dipoles = output, None
+    return prediction.view(-1, target_dim), transition_dipoles
 
 
 def weighted_mse_loss(pred, target, loss_weights=None, normalize: bool = True):
@@ -512,8 +534,15 @@ def evaluate(
             batch = batch.to(device)
             target = batch.y.view(-1, target_dim)
             _require_finite(target, 'validation targets', batch)
-            pred = model(batch.z, batch.pos, batch.batch).view(-1, target_dim)
+            pred, predicted_dipoles = _forward_model(model, batch, target_dim)
+            target_dipoles = (
+                batch.transition_dipole.view_as(predicted_dipoles)
+                if predicted_dipoles is not None
+                else None
+            )
             _require_finite(pred, 'validation predictions', batch)
+            if predicted_dipoles is not None:
+                _require_finite(predicted_dipoles, 'validation transition dipoles', batch)
             if oscillator_indices:
                 oscillator_pred = pred[:, oscillator_indices].double()
                 oscillator_inverse_overflow_count += int(
@@ -525,7 +554,16 @@ def evaluate(
                         'physical oscillator predictions',
                         batch,
                     )
-            loss = _training_loss(pred, target, target_columns, config or {}, loss_weights, normalize_loss_weights)
+            loss = _training_loss(
+                pred,
+                target,
+                target_columns,
+                config or {},
+                loss_weights,
+                normalize_loss_weights,
+                predicted_dipoles,
+                target_dipoles,
+            )
             _require_finite(loss, 'validation loss', batch)
             metrics = batch_mae(
                 pred,
@@ -533,6 +571,16 @@ def evaluate(
                 target_columns,
                 include_physical_oscillator_metrics,
             )
+            if predicted_dipoles is not None:
+                dipole_squared_error = phase_invariant_vector_squared_error(
+                    predicted_dipoles, target_dipoles
+                )
+                metrics['transition_dipole_phase_invariant_mae_D'] = (
+                    dipole_squared_error.sqrt().mean().item()
+                )
+                metrics['transition_dipole_magnitude_mae_D'] = (
+                    predicted_dipoles.norm(dim=-1) - target_dipoles.norm(dim=-1)
+                ).abs().mean().item()
             batch_n = target.shape[0]
             totals['loss'] += loss.item() * batch_n
             if loss_weights is not None:
@@ -816,9 +864,25 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 batch = batch.to(device)
                 target = batch.y.view(-1, len(target_columns))
                 _require_finite(target, 'training targets', batch)
-                pred = model(batch.z, batch.pos, batch.batch).view(-1, len(target_columns))
+                pred, predicted_dipoles = _forward_model(model, batch, len(target_columns))
+                target_dipoles = (
+                    batch.transition_dipole.view_as(predicted_dipoles)
+                    if predicted_dipoles is not None
+                    else None
+                )
                 _require_finite(pred, 'training predictions', batch)
-                loss = _training_loss(pred, target, target_columns, config, loss_weights_tensor, normalize_loss_weights)
+                if predicted_dipoles is not None:
+                    _require_finite(predicted_dipoles, 'training transition dipoles', batch)
+                loss = _training_loss(
+                    pred,
+                    target,
+                    target_columns,
+                    config,
+                    loss_weights_tensor,
+                    normalize_loss_weights,
+                    predicted_dipoles,
+                    target_dipoles,
+                )
                 _require_finite(loss, 'training loss', batch)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
