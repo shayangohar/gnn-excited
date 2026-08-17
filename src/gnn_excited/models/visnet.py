@@ -158,6 +158,67 @@ if nn is not None:
             return output, transition_dipole
 
 
+    class ViSNetTransitionDipoleSidecar(ViSNetOnePass):
+        """Preserve a trained scalar model while learning equivariant transition dipoles."""
+
+        def __init__(
+            self,
+            target_columns: Sequence[str],
+            hidden_channels: int = 128,
+            num_states: int = 5,
+            dipole_reduce_op: str = "sum",
+            **kwargs: Any,
+        ):
+            super().__init__(target_columns, hidden_channels, **kwargs)
+            if len(self.energy_indices) != num_states or len(self.oscillator_indices) != num_states:
+                raise ValueError(
+                    f"Transition-dipole sidecar requires {num_states} paired energy/oscillator states"
+                )
+            self.num_states = int(num_states)
+            self.dipole_reduce_op = str(dipole_reduce_op)
+            self.state_queries = nn.Embedding(self.num_states, self.hidden_channels)
+            self.dipole_decoder = nn.ModuleList(
+                [
+                    GatedEquivariantBlock(
+                        self.hidden_channels,
+                        self.hidden_channels // 2,
+                        scalar_activation=True,
+                    ),
+                    GatedEquivariantBlock(self.hidden_channels // 2, 1),
+                ]
+            )
+
+        def forward(self, z, pos, batch=None):
+            if batch is None:
+                batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            scalar, vector = self.encoder(z, pos, batch)
+            energy = scatter(self.energy_head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
+            dipoles = []
+            for query in self.state_queries.weight:
+                state_scalar = scalar + query
+                state_vector = vector
+                for layer in self.dipole_decoder:
+                    state_scalar, state_vector = layer(state_scalar, state_vector)
+                dipoles.append(
+                    scatter(state_vector, batch, dim=0, reduce=self.dipole_reduce_op).squeeze(-1)
+                )
+            transition_dipole = torch.stack(dipoles, dim=1)
+            oscillator = (
+                OSCILLATOR_STRENGTH_FACTOR
+                * energy.clamp_min(0)
+                * transition_dipole.pow(2).sum(dim=-1)
+            )
+            output = scalar.new_empty((energy.size(0), len(self.target_columns)))
+            output[:, list(self.energy_indices)] = energy
+            output[:, list(self.oscillator_indices)] = torch.log1p(oscillator)
+            return output, transition_dipole
+
+        def freeze_scalar_model(self) -> None:
+            for module in (self.encoder, self.energy_head, self.oscillator_head):
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
+
+
 else:
 
     class ViSNetOnePass:  # pragma: no cover
@@ -165,6 +226,7 @@ else:
             raise ModuleNotFoundError("ViSNetOnePass requires torch and torch_geometric") from _IMPORT_ERROR
 
     ViSNetSpectroscopyDecoder = ViSNetOnePass
+    ViSNetTransitionDipoleSidecar = ViSNetOnePass
 
 
 def build_visnet(**kwargs: Any):
@@ -173,7 +235,15 @@ def build_visnet(**kwargs: Any):
     target_columns = kwargs.pop("target_columns", None)
     if target_columns is None:
         raise ValueError("build_visnet requires target_columns")
-    model_class = ViSNetSpectroscopyDecoder if kwargs.pop("spectroscopy_decoder", False) else ViSNetOnePass
+    spectroscopy_decoder = kwargs.pop("spectroscopy_decoder", False)
+    transition_dipole_sidecar = kwargs.pop("transition_dipole_sidecar", False)
+    if spectroscopy_decoder and transition_dipole_sidecar:
+        raise ValueError("Choose either spectroscopy_decoder or transition_dipole_sidecar")
+    model_class = (
+        ViSNetTransitionDipoleSidecar
+        if transition_dipole_sidecar
+        else ViSNetSpectroscopyDecoder if spectroscopy_decoder else ViSNetOnePass
+    )
     return model_class(target_columns=target_columns, **kwargs)
 
 
@@ -204,9 +274,13 @@ def load_transfer_checkpoint(
         "full": "full_finetune",
         "finetune": "full_finetune",
         "encoder_only": "encoder_finetune",
+        "sidecar": "frozen_sidecar",
     }.get(str(mode).lower(), str(mode).lower())
-    if mode not in {"readout_only", "full_finetune", "encoder_finetune"}:
-        raise ValueError("transfer mode must be readout_only, full_finetune, or encoder_finetune")
+    if mode not in {"readout_only", "full_finetune", "encoder_finetune", "frozen_sidecar"}:
+        raise ValueError(
+            "transfer mode must be readout_only, full_finetune, encoder_finetune, "
+            "or frozen_sidecar"
+        )
     state = _checkpoint_state(checkpoint, map_location)
     if mode == "encoder_finetune":
         encoder_state = {key: value for key, value in state.items() if key.startswith("encoder.")}
@@ -222,6 +296,16 @@ def load_transfer_checkpoint(
         model.unfreeze_encoder()
         return model
     missing, unexpected = model.load_state_dict(state, strict=False)
+    if mode == "frozen_sidecar":
+        allowed_missing = ("state_queries.", "dipole_decoder.")
+        incompatible_missing = [key for key in missing if not key.startswith(allowed_missing)]
+        if incompatible_missing or unexpected or not hasattr(model, "freeze_scalar_model"):
+            raise ValueError(
+                f"Incompatible transition-dipole sidecar checkpoint: "
+                f"missing={sorted(incompatible_missing)}, unexpected={sorted(unexpected)}"
+            )
+        model.freeze_scalar_model()
+        return model
     if missing or unexpected:
         raise ValueError(f"Incompatible ViSNet checkpoint: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
     if mode == "readout_only":

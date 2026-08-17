@@ -112,3 +112,57 @@ def test_spectroscopy_decoder_physics_phase_loss_and_encoder_transfer() -> None:
     assert terms["transition_dipole_phase_invariant_mse"].item() == pytest.approx(0.0, abs=1e-8)
     terms["total"].backward()
     assert model.state_queries.weight.grad is not None
+
+
+def test_transition_dipole_sidecar_preserves_scalar_energy_model() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import OSCILLATOR_STRENGTH_FACTOR, build_visnet, load_transfer_checkpoint
+
+    columns = tuple(
+        column
+        for state in range(1, 6)
+        for column in (f"S{state}_eV", f"log1p_S{state}_f")
+    )
+    kwargs = {
+        "target_columns": columns,
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    scalar_model = build_visnet(**kwargs)
+    sidecar = build_visnet(**kwargs, transition_dipole_sidecar=True)
+    load_transfer_checkpoint(
+        sidecar,
+        {"model_state_dict": scalar_model.state_dict()},
+        mode="frozen_sidecar",
+    )
+    assert all(
+        not parameter.requires_grad
+        for module in (sidecar.encoder, sidecar.energy_head, sidecar.oscillator_head)
+        for parameter in module.parameters()
+    )
+    assert sidecar.state_queries.weight.requires_grad
+
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+    scalar_prediction = scalar_model(z, pos, batch)
+    prediction, dipoles = sidecar(z, pos, batch)
+    assert torch.equal(prediction[:, 0::2], scalar_prediction[:, 0::2])
+    expected_log_f = torch.log1p(
+        OSCILLATOR_STRENGTH_FACTOR
+        * prediction[:, 0::2].clamp_min(0)
+        * dipoles.pow(2).sum(dim=-1)
+    )
+    assert torch.allclose(prediction[:, 1::2], expected_log_f)
+
+    (prediction.sum() + dipoles.sum()).backward()
+    assert all(
+        parameter.grad is None
+        for module in (sidecar.encoder, sidecar.energy_head, sidecar.oscillator_head)
+        for parameter in module.parameters()
+    )
+    assert sidecar.state_queries.weight.grad is not None
