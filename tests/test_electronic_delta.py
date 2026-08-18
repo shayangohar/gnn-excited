@@ -115,6 +115,7 @@ def test_qm9gwbse_dataset_loads_train_standardized_descriptors(
     descriptor_path = tmp_path / "descriptors.h5"
     raw = np.arange(45, dtype=np.float32).reshape(5, 9)
     with h5py.File(descriptor_path, "w") as handle:
+        handle.attrs["feature_names_json"] = '["energy", "oscillator", "dipole", "amplitude", "occupied", "virtual", "character", "gap", "ip"]'
         handle.attrs["train_mean"] = np.ones(9, dtype=np.float32)
         handle.attrs["train_std"] = np.full(9, 2.0, dtype=np.float32)
         handle.create_group("1").create_dataset("state_features", data=raw)
@@ -134,3 +135,21 @@ def test_qm9gwbse_dataset_loads_train_standardized_descriptors(
     assert np.allclose(
         dataset[0].electronic_descriptors.numpy(), (raw - 1.0) / 2.0
     )
+    selected = QM9GWBSEDataset(
+        molecular_path,
+        manifest_path,
+        target_columns=("S1_eV", "log1p_S1_f"),
+        electronic_descriptors_path=descriptor_path,
+        electronic_descriptor_features=("energy", "gap"),
+    )
+    assert selected[0].electronic_descriptors.shape == (5, 2)
+    assert np.allclose(
+        selected[0].electronic_descriptors.numpy(), (raw[:, [0, 7]] - 1.0) / 2.0
+    )
+    with pytest.raises(ValueError, match="Unknown electronic descriptor features"):
+        QM9GWBSEDataset(
+            molecular_path,
+            manifest_path,
+            electronic_descriptors_path=descriptor_path,
+            electronic_descriptor_features=("missing",),
+        )

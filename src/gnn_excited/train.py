@@ -775,7 +775,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         )
         if dataset_class is QM9GWBSEDataset:
             return dataset_class(
-                *args, electronic_descriptors_path=electronic_descriptors_path
+                *args,
+                electronic_descriptors_path=electronic_descriptors_path,
+                electronic_descriptor_features=dataset_cfg.get(
+                    'electronic_descriptor_features'
+                ),
             )
         return dataset_class(*args)
 

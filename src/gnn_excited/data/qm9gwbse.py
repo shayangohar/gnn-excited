@@ -478,6 +478,7 @@ class QM9GWBSEDataset(Dataset):
         molecule_keys: Sequence[str] | None = None,
         target_columns: Sequence[str] | None = None,
         electronic_descriptors_path: str | Path | None = None,
+        electronic_descriptor_features: Sequence[str] | None = None,
     ):
         if _PYG_IMPORT_ERROR is not None:
             raise ModuleNotFoundError("QM9GWBSEDataset requires torch and torch_geometric") from _PYG_IMPORT_ERROR
@@ -502,6 +503,7 @@ class QM9GWBSEDataset(Dataset):
         self._descriptor_handle_obj: h5py.File | None = None
         self._descriptor_mean: np.ndarray | None = None
         self._descriptor_std: np.ndarray | None = None
+        self._descriptor_indices: np.ndarray | None = None
         if self.electronic_descriptors_path is not None:
             with h5py.File(self.electronic_descriptors_path, "r") as descriptors:
                 available = set(descriptors.keys())
@@ -510,8 +512,26 @@ class QM9GWBSEDataset(Dataset):
                     raise ValueError(
                         f"Electronic descriptors missing for {len(missing)} requested molecules; first={missing[0]}"
                     )
-                self._descriptor_mean = np.asarray(descriptors.attrs["train_mean"], dtype=np.float32)
-                self._descriptor_std = np.asarray(descriptors.attrs["train_std"], dtype=np.float32)
+                mean = np.asarray(descriptors.attrs["train_mean"], dtype=np.float32)
+                std = np.asarray(descriptors.attrs["train_std"], dtype=np.float32)
+                if electronic_descriptor_features is None:
+                    indices = np.arange(mean.size)
+                else:
+                    feature_names = tuple(json.loads(descriptors.attrs["feature_names_json"]))
+                    requested = tuple(electronic_descriptor_features)
+                    if len(set(requested)) != len(requested):
+                        raise ValueError("Electronic descriptor feature names must be unique")
+                    missing_features = set(requested).difference(feature_names)
+                    if missing_features:
+                        raise ValueError(
+                            f"Unknown electronic descriptor features: {sorted(missing_features)}"
+                        )
+                    indices = np.asarray(
+                        [feature_names.index(name) for name in requested], dtype=np.int64
+                    )
+                self._descriptor_indices = indices
+                self._descriptor_mean = mean[indices]
+                self._descriptor_std = std[indices]
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -561,7 +581,7 @@ class QM9GWBSEDataset(Dataset):
             raw = np.asarray(
                 self._descriptor_handle()[row["molecule_key"]]["state_features"][()],
                 dtype=np.float32,
-            )
+            )[:, self._descriptor_indices]
             normalized = (raw - self._descriptor_mean) / self._descriptor_std
             data.electronic_descriptors = torch.as_tensor(normalized, dtype=torch.float32)
         return data
