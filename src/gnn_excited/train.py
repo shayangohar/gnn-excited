@@ -28,7 +28,7 @@ else:
     _IMPORT_ERROR = None
 
 from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, explicit_split
-from gnn_excited.data.qm9gwbse import QM9GWBSEDataset
+from gnn_excited.data.qm9gwbse import QM9GWBSEDataset, electronic_descriptor_keys
 from gnn_excited.models.dimenetpp import build_dimenetpp
 from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
 from gnn_excited.losses import phase_invariant_vector_squared_error, qm9gwbse_loss
@@ -181,7 +181,16 @@ def _training_loss(
 
 
 def _forward_model(model, batch, target_dim: int):
-    output = model(batch.z, batch.pos, batch.batch)
+    descriptors = getattr(batch, "electronic_descriptors", None)
+    if descriptors is not None and hasattr(model, "descriptor_dim"):
+        output = model(
+            batch.z,
+            batch.pos,
+            batch.batch,
+            electronic_descriptors=descriptors,
+        )
+    else:
+        output = model(batch.z, batch.pos, batch.batch)
     if isinstance(output, tuple):
         prediction, transition_dipoles = output
         transition_dipoles = transition_dipoles.view(prediction.shape[0], -1, 3)
@@ -719,6 +728,14 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     effective_hdf5_path = _copy_hdf5_to_local_scratch(dataset_cfg['hdf5_path'], dataset_cfg)
     rows = _load_manifest_rows(dataset_cfg['manifest_path'])
     manifest_ok_rows = len(rows)
+    electronic_descriptors_path = dataset_cfg.get('electronic_descriptors_path')
+    descriptor_rows_missing = 0
+    if electronic_descriptors_path:
+        available_descriptor_keys = electronic_descriptor_keys(electronic_descriptors_path)
+        descriptor_rows_missing = sum(
+            row['molecule_key'] not in available_descriptor_keys for row in rows
+        )
+        rows = [row for row in rows if row['molecule_key'] in available_descriptor_keys]
     exclude_keys_path = dataset_cfg.get('exclude_keys_path')
     rows, excluded_manifest_rows = filter_manifest_exclusions(rows, exclude_keys_path)
     max_rows = dataset_cfg.get('max_manifest_molecules')
@@ -749,9 +766,22 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
     dataset_type = str(dataset_cfg.get('type', 'qcdge')).lower()
     dataset_class = QM9GWBSEDataset if dataset_type in {'qm9gwbse', 'qm9-gwbse'} else QCDGES1Dataset
-    train_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, train_idx), target_columns)
-    val_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, val_idx), target_columns)
-    test_ds = dataset_class(effective_hdf5_path, dataset_cfg['manifest_path'], _subset_keys(rows, test_idx), target_columns)
+    def make_dataset(indices):
+        args = (
+            effective_hdf5_path,
+            dataset_cfg['manifest_path'],
+            _subset_keys(rows, indices),
+            target_columns,
+        )
+        if dataset_class is QM9GWBSEDataset:
+            return dataset_class(
+                *args, electronic_descriptors_path=electronic_descriptors_path
+            )
+        return dataset_class(*args)
+
+    train_ds = make_dataset(train_idx)
+    val_ds = make_dataset(val_idx)
+    test_ds = make_dataset(test_idx)
 
     train_loader = _make_loader(train_ds, train_cfg, device, shuffle=True, seed=training_seed)
     val_loader = _make_loader(val_ds, train_cfg, device, shuffle=False, seed=training_seed + 1)
@@ -818,6 +848,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         'environment': collect_run_metadata(device),
         'reproducibility': reproducibility,
         'manifest_ok_rows': manifest_ok_rows,
+        'electronic_descriptors_path': str(electronic_descriptors_path) if electronic_descriptors_path else None,
+        'descriptor_rows_missing': descriptor_rows_missing,
         'excluded_manifest_rows': excluded_manifest_rows,
         'exclude_keys_path': str(exclude_keys_path) if exclude_keys_path else None,
         'evaluation_checkpoint_path': str(evaluation_checkpoint) if evaluation_checkpoint else None,

@@ -261,6 +261,94 @@ if nn is not None:
                 for parameter in module.parameters():
                     parameter.requires_grad_(False)
 
+    class ViSNetElectronicDescriptorDelta(ViSNetTransitionDipoleSidecar):
+        """Learn per-root electronic residuals on top of a frozen scalar ViSNet."""
+
+        def __init__(
+            self,
+            *args,
+            descriptor_dim: int,
+            delta_use_geometry_context: bool = True,
+            **kwargs,
+        ):
+            super().__init__(*args, **kwargs)
+            self.descriptor_dim = int(descriptor_dim)
+            self.delta_use_geometry_context = bool(delta_use_geometry_context)
+            self.energy_state_queries = nn.Embedding(
+                self.num_states, self.hidden_channels
+            )
+            self.energy_descriptor_projection = nn.Sequential(
+                nn.Linear(self.descriptor_dim, self.hidden_channels),
+                nn.SiLU(),
+                nn.Linear(self.hidden_channels, self.hidden_channels),
+            )
+            self.dipole_descriptor_projection = nn.Sequential(
+                nn.Linear(self.descriptor_dim, self.hidden_channels),
+                nn.SiLU(),
+                nn.Linear(self.hidden_channels, self.hidden_channels),
+            )
+            self.energy_delta_head = nn.Sequential(
+                nn.Linear(self.hidden_channels, self.hidden_channels),
+                nn.SiLU(),
+                nn.Linear(self.hidden_channels, 1),
+            )
+            nn.init.zeros_(self.energy_delta_head[-1].weight)
+            nn.init.zeros_(self.energy_delta_head[-1].bias)
+
+        def forward(self, z, pos, batch=None, electronic_descriptors=None):
+            if electronic_descriptors is None:
+                raise ValueError(
+                    "Electronic descriptor delta model requires electronic_descriptors"
+                )
+            if batch is None:
+                batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            scalar, vector = self.encoder(z, pos, batch)
+            baseline_energy = scatter(
+                self.energy_head(scalar, vector),
+                batch,
+                dim=0,
+                reduce=self.reduce_op,
+            )
+            batch_size = baseline_energy.size(0)
+            descriptors = electronic_descriptors.view(
+                batch_size, self.num_states, self.descriptor_dim
+            )
+            energy_features = self.energy_descriptor_projection(descriptors)
+            if self.delta_use_geometry_context:
+                geometry_context = scatter(
+                    scalar, batch, dim=0, reduce=self.reduce_op
+                ).unsqueeze(1)
+                energy_features = energy_features + geometry_context
+            energy_features = (
+                energy_features + self.energy_state_queries.weight.unsqueeze(0)
+            )
+            energy = baseline_energy + self.energy_delta_head(
+                energy_features
+            ).squeeze(-1)
+
+            dipole_features = self.dipole_descriptor_projection(descriptors)
+            dipoles = []
+            for state, query in enumerate(self.state_queries.weight):
+                state_scalar = scalar + query + dipole_features[:, state, :][batch]
+                state_vector = vector
+                for layer in self.dipole_decoder:
+                    state_scalar, state_vector = layer(state_scalar, state_vector)
+                dipoles.append(
+                    scatter(
+                        state_vector, batch, dim=0, reduce=self.dipole_reduce_op
+                    ).squeeze(-1)
+                )
+            transition_dipole = torch.stack(dipoles, dim=1)
+            oscillator = (
+                OSCILLATOR_STRENGTH_FACTOR
+                * energy.clamp_min(0)
+                * transition_dipole.pow(2).sum(dim=-1)
+            )
+            output = scalar.new_empty((batch_size, len(self.target_columns)))
+            output[:, list(self.energy_indices)] = energy
+            output[:, list(self.oscillator_indices)] = torch.log1p(oscillator)
+            return output, transition_dipole
+
     class ViSNetTransitionRefinementSidecar(ViSNetTransitionDipoleSidecar):
         """Add one trainable ViSNet interaction only to the transition path."""
 
@@ -318,6 +406,7 @@ else:
 
     ViSNetSpectroscopyDecoder = ViSNetOnePass
     ViSNetTransitionDipoleSidecar = ViSNetOnePass
+    ViSNetElectronicDescriptorDelta = ViSNetOnePass
     ViSNetTransitionRefinementSidecar = ViSNetOnePass
     ViSNetStateConditionedTransitionRefinementSidecar = ViSNetOnePass
 
@@ -332,6 +421,7 @@ def build_visnet(**kwargs: Any):
         raise ValueError("build_visnet requires target_columns")
     spectroscopy_decoder = kwargs.pop("spectroscopy_decoder", False)
     transition_dipole_sidecar = kwargs.pop("transition_dipole_sidecar", False)
+    electronic_descriptor_delta = kwargs.pop("electronic_descriptor_delta", False)
     transition_refinement_sidecar = kwargs.pop("transition_refinement_sidecar", False)
     state_conditioned_transition_refinement = kwargs.pop(
         "state_conditioned_transition_refinement", False
@@ -343,6 +433,7 @@ def build_visnet(**kwargs: Any):
                 (
                     spectroscopy_decoder,
                     transition_dipole_sidecar,
+                    electronic_descriptor_delta,
                     transition_refinement_sidecar,
                     state_conditioned_transition_refinement,
                 ),
@@ -351,21 +442,18 @@ def build_visnet(**kwargs: Any):
         > 1
     ):
         raise ValueError("Choose one ViSNet spectroscopy architecture")
-    model_class = (
-        ViSNetStateConditionedTransitionRefinementSidecar
-        if state_conditioned_transition_refinement
-        else (
-            ViSNetTransitionRefinementSidecar
-            if transition_refinement_sidecar
-            else (
-                ViSNetTransitionDipoleSidecar
-                if transition_dipole_sidecar
-                else (
-                    ViSNetSpectroscopyDecoder if spectroscopy_decoder else ViSNetOnePass
-                )
-            )
-        )
-    )
+    if electronic_descriptor_delta:
+        model_class = ViSNetElectronicDescriptorDelta
+    elif state_conditioned_transition_refinement:
+        model_class = ViSNetStateConditionedTransitionRefinementSidecar
+    elif transition_refinement_sidecar:
+        model_class = ViSNetTransitionRefinementSidecar
+    elif transition_dipole_sidecar:
+        model_class = ViSNetTransitionDipoleSidecar
+    elif spectroscopy_decoder:
+        model_class = ViSNetSpectroscopyDecoder
+    else:
+        model_class = ViSNetOnePass
     return model_class(target_columns=target_columns, **kwargs)
 
 
@@ -435,6 +523,10 @@ def load_transfer_checkpoint(
         allowed_missing = (
             "state_queries.",
             "dipole_decoder.",
+            "energy_state_queries.",
+            "energy_descriptor_projection.",
+            "dipole_descriptor_projection.",
+            "energy_delta_head.",
             "transition_refinement.",
             "transition_refinement_gate",
         )

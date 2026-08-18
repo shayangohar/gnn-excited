@@ -462,14 +462,32 @@ else:
     _PYG_IMPORT_ERROR = None
 
 
+def electronic_descriptor_keys(path: str | Path) -> set[str]:
+    """Return molecule keys with successfully generated electronic descriptors."""
+    with h5py.File(path, "r") as handle:
+        return set(handle.keys())
+
+
 class QM9GWBSEDataset(Dataset):
     """Lazy PyG view of the compact QM9GWBSE HDF5 and manifest."""
 
-    def __init__(self, hdf5_path: str | Path, manifest_path: str | Path, molecule_keys: Sequence[str] | None = None, target_columns: Sequence[str] | None = None):
+    def __init__(
+        self,
+        hdf5_path: str | Path,
+        manifest_path: str | Path,
+        molecule_keys: Sequence[str] | None = None,
+        target_columns: Sequence[str] | None = None,
+        electronic_descriptors_path: str | Path | None = None,
+    ):
         if _PYG_IMPORT_ERROR is not None:
             raise ModuleNotFoundError("QM9GWBSEDataset requires torch and torch_geometric") from _PYG_IMPORT_ERROR
         super().__init__()
         self.hdf5_path = Path(hdf5_path)
+        self.electronic_descriptors_path = (
+            Path(electronic_descriptors_path)
+            if electronic_descriptors_path is not None
+            else None
+        )
         self.target_columns = tuple(target_columns or ("S1_eV", "log1p_S1_f"))
         allowed = None if molecule_keys is None else {str(value) for value in molecule_keys}
         with Path(manifest_path).open("r", newline="", encoding="utf-8") as stream:
@@ -481,20 +499,41 @@ class QM9GWBSEDataset(Dataset):
         if not self.rows:
             raise ValueError(f"No usable rows found in manifest {manifest_path}")
         self._handle_obj: h5py.File | None = None
+        self._descriptor_handle_obj: h5py.File | None = None
+        self._descriptor_mean: np.ndarray | None = None
+        self._descriptor_std: np.ndarray | None = None
+        if self.electronic_descriptors_path is not None:
+            with h5py.File(self.electronic_descriptors_path, "r") as descriptors:
+                available = set(descriptors.keys())
+                missing = [row["molecule_key"] for row in self.rows if row["molecule_key"] not in available]
+                if missing:
+                    raise ValueError(
+                        f"Electronic descriptors missing for {len(missing)} requested molecules; first={missing[0]}"
+                    )
+                self._descriptor_mean = np.asarray(descriptors.attrs["train_mean"], dtype=np.float32)
+                self._descriptor_std = np.asarray(descriptors.attrs["train_std"], dtype=np.float32)
 
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_handle_obj"] = None
+        state["_descriptor_handle_obj"] = None
         return state
 
     def __del__(self):
         if getattr(self, "_handle_obj", None) is not None:
             self._handle_obj.close()
+        if getattr(self, "_descriptor_handle_obj", None) is not None:
+            self._descriptor_handle_obj.close()
 
     def _handle(self) -> h5py.File:
         if self._handle_obj is None:
             self._handle_obj = h5py.File(self.hdf5_path, "r")
         return self._handle_obj
+
+    def _descriptor_handle(self) -> h5py.File:
+        if self._descriptor_handle_obj is None:
+            self._descriptor_handle_obj = h5py.File(self.electronic_descriptors_path, "r")
+        return self._descriptor_handle_obj
 
     def len(self) -> int:
         return len(self.rows)
@@ -510,7 +549,7 @@ class QM9GWBSEDataset(Dataset):
             dtype=torch.float32,
         )
         y = torch.tensor([[float(row[column]) for column in self.target_columns]], dtype=torch.float32)
-        return Data(
+        data = Data(
             z=z,
             pos=pos,
             y=y,
@@ -518,3 +557,11 @@ class QM9GWBSEDataset(Dataset):
             molecule_key=row["molecule_key"],
             qm9_id=row["qm9_id"],
         )
+        if self.electronic_descriptors_path is not None:
+            raw = np.asarray(
+                self._descriptor_handle()[row["molecule_key"]]["state_features"][()],
+                dtype=np.float32,
+            )
+            normalized = (raw - self._descriptor_mean) / self._descriptor_std
+            data.electronic_descriptors = torch.as_tensor(normalized, dtype=torch.float32)
+        return data
