@@ -194,7 +194,13 @@ def test_transition_dipole_sidecar_preserves_scalar_energy_model() -> None:
     assert sidecar.state_queries.weight.grad is not None
 
 
-def test_transition_refinement_preserves_energy_and_initializes_from_encoder() -> None:
+@pytest.mark.parametrize(
+    "model_flag",
+    ["transition_refinement_sidecar", "state_conditioned_transition_refinement"],
+)
+def test_transition_refinement_preserves_energy_and_initializes_from_encoder(
+    model_flag: str,
+) -> None:
     pytest.importorskip("torch_geometric")
     torch = pytest.importorskip("torch")
     from gnn_excited.models.visnet import (
@@ -217,7 +223,7 @@ def test_transition_refinement_preserves_energy_and_initializes_from_encoder() -
         "max_num_neighbors": 8,
     }
     scalar_model = build_visnet(**kwargs)
-    refined = build_visnet(**kwargs, transition_refinement_sidecar=True)
+    refined = build_visnet(**kwargs, **{model_flag: True})
     load_transfer_checkpoint(
         refined,
         {"model_state_dict": scalar_model.state_dict()},
@@ -246,7 +252,23 @@ def test_transition_refinement_preserves_energy_and_initializes_from_encoder() -
     pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
     batch = torch.zeros(3, dtype=torch.long)
     scalar_prediction = scalar_model(z, pos, batch)
+    refinement_inputs = []
+    hook = refined.transition_refinement.register_forward_pre_hook(
+        lambda _module, args: refinement_inputs.append(args[0].detach().clone())
+    )
     prediction, dipoles = refined(z, pos, batch)
+    hook.remove()
+    if model_flag == "state_conditioned_transition_refinement":
+        assert len(refinement_inputs) == 5
+        expected_query_delta = (
+            refined.state_queries.weight[1] - refined.state_queries.weight[0]
+        )
+        assert torch.allclose(
+            refinement_inputs[1] - refinement_inputs[0],
+            expected_query_delta.expand_as(refinement_inputs[0]),
+        )
+    else:
+        assert len(refinement_inputs) == 1
     assert torch.equal(prediction[:, 0::2], scalar_prediction[:, 0::2])
     expected_log_f = torch.log1p(
         OSCILLATOR_STRENGTH_FACTOR

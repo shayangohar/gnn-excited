@@ -220,6 +220,9 @@ if nn is not None:
         def _transition_features(self, z, pos, batch, scalar, vector):
             return scalar, vector
 
+        def _query_features(self, z, pos, batch, scalar, vector, query):
+            return scalar + query, vector
+
         def forward(self, z, pos, batch=None):
             if batch is None:
                 batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
@@ -232,8 +235,9 @@ if nn is not None:
             )
             dipoles = []
             for query in self.state_queries.weight:
-                state_scalar = transition_scalar + query
-                state_vector = transition_vector
+                state_scalar, state_vector = self._query_features(
+                    z, pos, batch, transition_scalar, transition_vector, query
+                )
                 for layer in self.dipole_decoder:
                     state_scalar, state_vector = layer(state_scalar, state_vector)
                 dipoles.append(
@@ -270,7 +274,7 @@ if nn is not None:
                 self.encoder.vis_mp_layers[-1].state_dict()
             )
 
-        def _transition_features(self, z, pos, batch, scalar, vector):
+        def _refine(self, z, pos, batch, scalar, vector):
             edge_index, edge_weight, edge_vector = self.encoder.distance(pos, batch)
             radial = self.encoder.distance_expansion(edge_weight)
             mask = edge_index[0] != edge_index[1]
@@ -290,6 +294,20 @@ if nn is not None:
                 vector + self.transition_refinement_gate * delta_vector,
             )
 
+        def _transition_features(self, z, pos, batch, scalar, vector):
+            return self._refine(z, pos, batch, scalar, vector)
+
+    class ViSNetStateConditionedTransitionRefinementSidecar(
+        ViSNetTransitionRefinementSidecar
+    ):
+        """Inject each state query before the shared transition interaction."""
+
+        def _transition_features(self, z, pos, batch, scalar, vector):
+            return scalar, vector
+
+        def _query_features(self, z, pos, batch, scalar, vector, query):
+            return self._refine(z, pos, batch, scalar + query, vector)
+
 else:
 
     class ViSNetOnePass:  # pragma: no cover
@@ -301,6 +319,7 @@ else:
     ViSNetSpectroscopyDecoder = ViSNetOnePass
     ViSNetTransitionDipoleSidecar = ViSNetOnePass
     ViSNetTransitionRefinementSidecar = ViSNetOnePass
+    ViSNetStateConditionedTransitionRefinementSidecar = ViSNetOnePass
 
 
 def build_visnet(**kwargs: Any):
@@ -314,6 +333,9 @@ def build_visnet(**kwargs: Any):
     spectroscopy_decoder = kwargs.pop("spectroscopy_decoder", False)
     transition_dipole_sidecar = kwargs.pop("transition_dipole_sidecar", False)
     transition_refinement_sidecar = kwargs.pop("transition_refinement_sidecar", False)
+    state_conditioned_transition_refinement = kwargs.pop(
+        "state_conditioned_transition_refinement", False
+    )
     if (
         sum(
             map(
@@ -322,6 +344,7 @@ def build_visnet(**kwargs: Any):
                     spectroscopy_decoder,
                     transition_dipole_sidecar,
                     transition_refinement_sidecar,
+                    state_conditioned_transition_refinement,
                 ),
             )
         )
@@ -329,12 +352,18 @@ def build_visnet(**kwargs: Any):
     ):
         raise ValueError("Choose one ViSNet spectroscopy architecture")
     model_class = (
-        ViSNetTransitionRefinementSidecar
-        if transition_refinement_sidecar
+        ViSNetStateConditionedTransitionRefinementSidecar
+        if state_conditioned_transition_refinement
         else (
-            ViSNetTransitionDipoleSidecar
-            if transition_dipole_sidecar
-            else ViSNetSpectroscopyDecoder if spectroscopy_decoder else ViSNetOnePass
+            ViSNetTransitionRefinementSidecar
+            if transition_refinement_sidecar
+            else (
+                ViSNetTransitionDipoleSidecar
+                if transition_dipole_sidecar
+                else (
+                    ViSNetSpectroscopyDecoder if spectroscopy_decoder else ViSNetOnePass
+                )
+            )
         )
     )
     return model_class(target_columns=target_columns, **kwargs)
