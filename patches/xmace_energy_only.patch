@@ -40,3 +40,31 @@ index 778dbb0..1ec3d20 100644
 +        else None
      )
 +    virials, stress = None, None
+diff --git a/mace/tools/train.py b/mace/tools/train.py
+--- a/mace/tools/train.py
++++ b/mace/tools/train.py
+@@ -261,7 +261,8 @@ def train(
+                     wandb_log_dict = {
+                         "epoch": epoch,
+                         "valid_loss": valid_loss,
+                         "valid_rmse_e_per_atom": eval_metrics["rmse_e_per_atom"],
+-                        "valid_rmse_f": eval_metrics["rmse_f"],
+                     }
++                    if "rmse_f" in eval_metrics:
++                        wandb_log_dict["valid_rmse_f"] = eval_metrics["rmse_f"]
+                     wandb.log(wandb_log_dict)
+diff --git a/mace/tools/scripts_utils.py b/mace/tools/scripts_utils.py
+--- a/mace/tools/scripts_utils.py
++++ b/mace/tools/scripts_utils.py
+@@ -562,8 +562,9 @@ def create_error_table(
+             wandb_log_dict = {
+                 name
+                 + "_final_rmse_e_per_atom": metrics["rmse_e_per_atom"]
+                 * 1e3,  # meV / atom
+-                name + "_final_rmse_f": metrics["rmse_f"] * 1e3,  # meV / A
+-                name + "_final_rel_rmse_f": metrics["rel_rmse_f"],
+             }
++            if "rmse_f" in metrics:
++                wandb_log_dict[name + "_final_rmse_f"] = metrics["rmse_f"] * 1e3
++                wandb_log_dict[name + "_final_rel_rmse_f"] = metrics["rel_rmse_f"]
+             wandb.log(wandb_log_dict)
