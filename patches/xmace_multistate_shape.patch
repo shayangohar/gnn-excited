@@ -1,0 +1,28 @@
+diff --git a/mace/modules/loss.py b/mace/modules/loss.py
+index e7cc661..1b40df4 100644
+--- a/mace/modules/loss.py
++++ b/mace/modules/loss.py
+@@ -14 +14 @@ def mean_squared_error_energy(ref: Batch, pred: TensorDict) -> torch.Tensor:
+-    return torch.mean(torch.square((ref["energy"] - pred["energy"])))
++    return torch.mean(torch.square((ref["energy"].view_as(pred["energy"]) - pred["energy"])))
+@@ -21 +21 @@ def reconstruction_error_invariants(ref: Batch, pred: TensorDict) -> torch.Tensor:
+-    return torch.mean(torch.square(ref["energy"] - pred["decoded_energy"]))
++    return torch.mean(torch.square(ref["energy"].view_as(pred["decoded_energy"]) - pred["decoded_energy"]))
+@@ -485 +485 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
+-        if ref["energy"].shape == pred["energy"].shape:
++        if ref["energy"].numel() == pred["energy"].numel():
+diff --git a/mace/tools/train.py b/mace/tools/train.py
+index 573b330..4d5ea28 100644
+--- a/mace/tools/train.py
++++ b/mace/tools/train.py
+@@ -371 +371,2 @@ def take_step(
+-        centred_energy = (batch["energy"] - output["e0s"] - output["pair_energy"]).unsqueeze(-1)
++        reference_energy = batch["energy"].view(-1, model.n_energies)
++        centred_energy = (reference_energy - output["e0s"] - output["pair_energy"]).unsqueeze(-1)
+@@ -420,2 +421,4 @@ def evaluate(
+-            encoded_energy = model.perm_encoder(batch["energy"].unsqueeze(-1))
+-            decoded_energy = model.perm_decoder(encoded_energy)
++            reference_energy = batch["energy"].view(-1, model.n_energies)
++            centred_energy = (reference_energy - output["e0s"] - output["pair_energy"]).unsqueeze(-1)
++            encoded_energy = model.perm_encoder(centred_energy)
++            decoded_energy = model.perm_decoder(encoded_energy) + output["e0s"] + output["pair_energy"]

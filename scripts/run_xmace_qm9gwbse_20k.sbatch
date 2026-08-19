@@ -28,6 +28,7 @@ module purge
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 test "$(git -C /projects/bhzu/software/X-MACE rev-parse HEAD)" = a92a3e9fa1639f3a94cadc00d3b16542c2b760b5
 git -C /projects/bhzu/software/X-MACE apply --reverse --check --unidiff-zero /projects/bhzu/gnn-excited/patches/xmace_energy_only.patch
+git -C /projects/bhzu/software/X-MACE apply --reverse --check --unidiff-zero /projects/bhzu/gnn-excited/patches/xmace_multistate_shape.patch
 python -c 'import mace, torch; assert torch.cuda.is_available(), "CUDA is unavailable"; print(mace.__version__)'
 python scripts/export_qm9gwbse_xmace.py \
   --hdf5 data/processed/qm9gwbse/qm9gwbse.h5 \
