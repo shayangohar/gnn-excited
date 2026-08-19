@@ -1,0 +1,42 @@
+diff --git a/mace/cli/run_train.py b/mace/cli/run_train.py
+index 8f8f9c7..8c95c78 100644
+--- a/mace/cli/run_train.py
++++ b/mace/cli/run_train.py
+@@ -230,7 +230,7 @@ def run(args: argparse.Namespace) -> None:
+         atomic_energies = None
+         compute_dipole = True
+         compute_energy = True
+-        args.compute_forces = True
++        args.compute_forces = args.forces_weight > 0
+         compute_nacs = True
+         compute_virials = False
+         args.compute_stress = False
+diff --git a/mace/modules/loss.py b/mace/modules/loss.py
+index e7cc661..792531f 100644
+--- a/mace/modules/loss.py
++++ b/mace/modules/loss.py
+@@ -488 +488 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
+-        if ref["forces"].shape == pred["forces"].shape:
++        if pred["forces"] is not None and ref["forces"].shape == pred["forces"].shape:
+diff --git a/mace/modules/utils.py b/mace/modules/utils.py
+index 778dbb0..1ec3d20 100644
+--- a/mace/modules/utils.py
++++ b/mace/modules/utils.py
+@@ -194,9 +194,10 @@ def get_outputs(
+-    forces, virials, stress = (
++    forces = (
+         compute_forces(
+-                energy=energy,
+-                positions=positions,
+-                training=(training or compute_hessian),
+-        ),
+-        None,
+-        None,
++            energy=energy,
++            positions=positions,
++            training=(training or compute_hessian),
++        )
++        if compute_force
++        else None
+     )
++    virials, stress = None, None
