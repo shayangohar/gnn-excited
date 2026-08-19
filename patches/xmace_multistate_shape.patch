@@ -26,3 +26,12 @@ index 573b330..4d5ea28 100644
 +            centred_energy = (reference_energy - output["e0s"] - output["pair_energy"]).unsqueeze(-1)
 +            encoded_energy = model.perm_encoder(centred_energy)
 +            decoded_energy = model.perm_decoder(encoded_energy) + output["e0s"] + output["pair_energy"]
+@@ -481,5 +484,6 @@ class MACELoss(Metric):
+         if output.get("energy") is not None and batch.energy is not None:
+             self.E_computed += 1.0
+-            self.delta_es.append(batch.energy - output["energy"])
++            reference_energy = batch.energy.view_as(output["energy"])
++            self.delta_es.append(reference_energy - output["energy"])
+             self.delta_es_per_atom.append(
+-                (batch.energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1]).unsqueeze(-1)
++                (reference_energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1]).unsqueeze(-1)
