@@ -408,6 +408,7 @@ if nn is not None:
             pooling: Sequence[str] = ("mean", "sum"),
             hamiltonian_hidden: int = 256,
             anchor_production_energies: bool = False,
+            per_atom_parameters: bool = False,
             offdiag_scale: float = 0.5,
             diag_bias_low: float = 3.0,
             diag_bias_high: float = 8.0,
@@ -424,8 +425,17 @@ if nn is not None:
                 raise ValueError("pooling must contain only 'mean'/'sum' operations")
             self.poolings = poolings
             self.anchor_production_energies = bool(anchor_production_energies)
+            self.per_atom_parameters = bool(per_atom_parameters)
+            if self.per_atom_parameters and self.anchor_production_energies:
+                raise ValueError(
+                    "per_atom_parameters with anchor_production_energies is not supported"
+                )
             self.offdiag_scale = float(offdiag_scale)
-            feature_dim = self.hidden_channels * len(self.poolings)
+            feature_dim = (
+                self.hidden_channels
+                if self.per_atom_parameters
+                else self.hidden_channels * len(self.poolings)
+            )
             if self.anchor_production_energies:
                 feature_dim += self.num_states
             width = int(hamiltonian_hidden)
@@ -456,21 +466,30 @@ if nn is not None:
             if batch is None:
                 batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
             scalar, vector = self.encoder(z, pos, batch)
-            pooled = [
-                scatter(scalar, batch, dim=0, reduce=op) for op in self.poolings
-            ]
-            features = pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
-            if self.anchor_production_energies:
-                production_energy = scatter(
-                    self.energy_head(scalar, vector),
-                    batch,
-                    dim=0,
-                    reduce=self.reduce_op,
+            if self.per_atom_parameters:
+                # Per-atom readout (as in the production heads) followed by
+                # mean aggregation: per-atom expressivity before pooling.
+                parameters = scatter(
+                    self.hamiltonian_mlp(scalar), batch, dim=0, reduce="mean"
                 )
-                features = torch.cat(
-                    [features, production_energy.detach()], dim=-1
+            else:
+                pooled = [
+                    scatter(scalar, batch, dim=0, reduce=op) for op in self.poolings
+                ]
+                features = (
+                    pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
                 )
-            parameters = self.hamiltonian_mlp(features)
+                if self.anchor_production_energies:
+                    production_energy = scatter(
+                        self.energy_head(scalar, vector),
+                        batch,
+                        dim=0,
+                        reduce=self.reduce_op,
+                    )
+                    features = torch.cat(
+                        [features, production_energy.detach()], dim=-1
+                    )
+                parameters = self.hamiltonian_mlp(features)
             states = torch.arange(self.num_states, device=parameters.device)
             hamiltonian = parameters.new_zeros(
                 (parameters.size(0), self.num_states, self.num_states)

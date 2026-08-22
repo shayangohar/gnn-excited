@@ -373,3 +373,45 @@ def test_latent_hamiltonian_anchor_variant_and_exclusive_flags() -> None:
         assert "Choose one" in str(error)
     else:
         raise AssertionError("exclusive architecture flags were accepted together")
+
+
+def test_latent_hamiltonian_per_atom_parameters() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import build_visnet
+
+    model = build_visnet(
+        target_columns=("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
+        hidden_channels=32,
+        num_layers=1,
+        num_rbf=8,
+        cutoff=3.0,
+        max_num_neighbors=8,
+        latent_hamiltonian=True,
+        num_states=2,
+        per_atom_parameters=True,
+        hamiltonian_hidden=16,
+    )
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+    output = model(z, pos, batch)
+    assert output.shape == (1, 4)
+    energies = output[:, [0, 2]]
+    assert bool((energies[:, 1] >= energies[:, 0]).all())
+    output.sum().backward()
+    assert model.hamiltonian_mlp[-1].weight.grad is not None
+    try:
+        build_visnet(
+            **{k: v for k, v in {
+                "target_columns": ("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
+                "hidden_channels": 32,
+            }.items()},
+            latent_hamiltonian=True,
+            per_atom_parameters=True,
+            anchor_production_energies=True,
+        )
+    except ValueError as error:
+        assert "not supported" in str(error)
+    else:
+        raise AssertionError("per-atom + anchor combination was accepted")
