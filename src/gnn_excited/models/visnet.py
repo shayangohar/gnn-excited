@@ -416,7 +416,9 @@ if nn is not None:
             **kwargs: Any,
         ):
             super().__init__(target_columns, hidden_channels, **kwargs)
-            if len(self.energy_indices) != int(num_states):
+            if not include_triplet_block and len(self.energy_indices) != int(
+                num_states
+            ):
                 raise ValueError(
                     f"Latent-Hamiltonian decoder requires {num_states} energy states"
                 )
