@@ -743,6 +743,7 @@ def load_transfer_checkpoint(
             "transition_refinement_gate",
             "hamiltonian_mlp.",
             "anchor_energy_head.",
+            "oscillator_head.",
         )
         incompatible_missing = [
             key for key in missing if not key.startswith(allowed_missing)
