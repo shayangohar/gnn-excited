@@ -686,6 +686,23 @@ def load_transfer_checkpoint(
             "or frozen_sidecar"
         )
     state = _checkpoint_state(checkpoint, map_location)
+    if mode == "frozen_sidecar":
+        # Shape-filter BEFORE loading: spin/layout variants legitimately have
+        # differently-shaped readout heads; refuse to skip anything else.
+        model_parameters = dict(model.named_parameters())
+        loadable_state = {}
+        shape_skipped = []
+        for key, value in state.items():
+            parameter = model_parameters.get(key)
+            if (
+                parameter is not None
+                and tuple(parameter.shape) != tuple(value.shape)
+                and key.startswith(("energy_head.", "oscillator_head.", "anchor_energy_head."))
+            ):
+                shape_skipped.append(key)
+            else:
+                loadable_state[key] = value
+        state = loadable_state
     if mode == "frozen_sidecar" and hasattr(model, "anchor_energy_head"):
         # Joint singlet-triplet variants rebuild heads; map the donor's
         # production singlet readout onto the anchor head and drop the rest.
@@ -715,23 +732,6 @@ def load_transfer_checkpoint(
         return model
     missing, unexpected = model.load_state_dict(state, strict=False)
     if mode == "frozen_sidecar":
-        model_parameters = dict(model.named_parameters())
-        loadable_state = {}
-        shape_skipped = []
-        for key, value in state.items():
-            parameter = model_parameters.get(key)
-            if parameter is not None and tuple(parameter.shape) != tuple(value.shape):
-                shape_skipped.append(key)
-            else:
-                loadable_state[key] = value
-        if any(
-            not key.startswith(("energy_head.", "oscillator_head.", "anchor_energy_head."))
-            for key in shape_skipped
-        ):
-            raise ValueError(
-                f"Incompatible frozen-sidecar checkpoint weights: {sorted(shape_skipped)}"
-            )
-        state = loadable_state
         allowed_missing = (
             "state_queries.",
             "dipole_decoder.",
