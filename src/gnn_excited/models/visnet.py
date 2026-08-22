@@ -396,6 +396,102 @@ if nn is not None:
         def _query_features(self, z, pos, batch, scalar, vector, query):
             return self._refine(z, pos, batch, scalar + query, vector)
 
+    class ViSNetLatentHamiltonian(ViSNetOnePass):
+        """Frozen scalar ViSNet whose state energies are the sorted eigenvalues of a
+        learned molecular tridiagonal Hamiltonian (ordering by construction)."""
+
+        def __init__(
+            self,
+            target_columns: Sequence[str],
+            hidden_channels: int = 128,
+            num_states: int = 5,
+            pooling: Sequence[str] = ("mean", "sum"),
+            hamiltonian_hidden: int = 256,
+            anchor_production_energies: bool = False,
+            offdiag_scale: float = 0.5,
+            diag_bias_low: float = 3.0,
+            diag_bias_high: float = 8.0,
+            **kwargs: Any,
+        ):
+            super().__init__(target_columns, hidden_channels, **kwargs)
+            if len(self.energy_indices) != int(num_states):
+                raise ValueError(
+                    f"Latent-Hamiltonian decoder requires {num_states} energy states"
+                )
+            self.num_states = int(num_states)
+            poolings = tuple(str(op) for op in pooling)
+            if not poolings or any(op not in ("mean", "sum") for op in poolings):
+                raise ValueError("pooling must contain only 'mean'/'sum' operations")
+            self.poolings = poolings
+            self.anchor_production_energies = bool(anchor_production_energies)
+            self.offdiag_scale = float(offdiag_scale)
+            feature_dim = self.hidden_channels * len(self.poolings)
+            if self.anchor_production_energies:
+                feature_dim += self.num_states
+            width = int(hamiltonian_hidden)
+            self.hamiltonian_mlp = nn.Sequential(
+                nn.Linear(feature_dim, width),
+                nn.SiLU(),
+                nn.Linear(width, width // 2),
+                nn.SiLU(),
+                nn.Linear(width // 2, 2 * self.num_states - 1),
+            )
+            # Deterministic near-data initialization: zero weights with diagonal
+            # biases spanning the excitation range, so the initial Hamiltonian is
+            # diagonal with strictly ascending eigenvalues near the label scale.
+            final = self.hamiltonian_mlp[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
+            with torch.no_grad():
+                final.bias[: self.num_states] = torch.linspace(
+                    float(diag_bias_low), float(diag_bias_high), self.num_states
+                )
+
+        def freeze_scalar_model(self) -> None:
+            for module in (self.encoder, self.energy_head, self.oscillator_head):
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
+
+        def forward(self, z, pos, batch=None):
+            if batch is None:
+                batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            scalar, vector = self.encoder(z, pos, batch)
+            pooled = [
+                scatter(scalar, batch, dim=0, reduce=op) for op in self.poolings
+            ]
+            features = pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
+            if self.anchor_production_energies:
+                production_energy = scatter(
+                    self.energy_head(scalar, vector),
+                    batch,
+                    dim=0,
+                    reduce=self.reduce_op,
+                )
+                features = torch.cat(
+                    [features, production_energy.detach()], dim=-1
+                )
+            parameters = self.hamiltonian_mlp(features)
+            states = torch.arange(self.num_states, device=parameters.device)
+            hamiltonian = parameters.new_zeros(
+                (parameters.size(0), self.num_states, self.num_states)
+            )
+            hamiltonian[:, states, states] = parameters[:, : self.num_states]
+            offdiagonal = self.offdiag_scale * torch.tanh(parameters[:, self.num_states :])
+            adjacent = states[:-1]
+            hamiltonian[:, adjacent, adjacent + 1] = offdiagonal
+            hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
+            energy = torch.linalg.eigvalsh(hamiltonian)
+            oscillator = scatter(
+                self.oscillator_head(scalar, vector),
+                batch,
+                dim=0,
+                reduce=self.reduce_op,
+            )
+            output = scalar.new_empty((energy.size(0), len(self.target_columns)))
+            output[:, list(self.energy_indices)] = energy.to(output.dtype)
+            output[:, list(self.oscillator_indices)] = oscillator.to(output.dtype)
+            return output
+
 else:
 
     class ViSNetOnePass:  # pragma: no cover
@@ -409,6 +505,7 @@ else:
     ViSNetElectronicDescriptorDelta = ViSNetOnePass
     ViSNetTransitionRefinementSidecar = ViSNetOnePass
     ViSNetStateConditionedTransitionRefinementSidecar = ViSNetOnePass
+    ViSNetLatentHamiltonian = ViSNetOnePass
 
 
 def build_visnet(**kwargs: Any):
@@ -426,6 +523,7 @@ def build_visnet(**kwargs: Any):
     state_conditioned_transition_refinement = kwargs.pop(
         "state_conditioned_transition_refinement", False
     )
+    latent_hamiltonian = kwargs.pop("latent_hamiltonian", False)
     if (
         sum(
             map(
@@ -436,6 +534,7 @@ def build_visnet(**kwargs: Any):
                     electronic_descriptor_delta,
                     transition_refinement_sidecar,
                     state_conditioned_transition_refinement,
+                    latent_hamiltonian,
                 ),
             )
         )
@@ -452,6 +551,8 @@ def build_visnet(**kwargs: Any):
         model_class = ViSNetTransitionDipoleSidecar
     elif spectroscopy_decoder:
         model_class = ViSNetSpectroscopyDecoder
+    elif latent_hamiltonian:
+        model_class = ViSNetLatentHamiltonian
     else:
         model_class = ViSNetOnePass
     return model_class(target_columns=target_columns, **kwargs)
@@ -529,6 +630,7 @@ def load_transfer_checkpoint(
             "energy_delta_head.",
             "transition_refinement.",
             "transition_refinement_gate",
+            "hamiltonian_mlp.",
         )
         incompatible_missing = [
             key for key in missing if not key.startswith(allowed_missing)

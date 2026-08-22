@@ -285,3 +285,90 @@ def test_transition_refinement_preserves_energy_and_initializes_from_encoder(
         for module in (refined.encoder, refined.energy_head, refined.oscillator_head)
         for parameter in module.parameters()
     )
+
+
+def test_latent_hamiltonian_sorted_eigenvalues_and_frozen_sidecar() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
+
+    kwargs = {
+        "target_columns": ("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    donor = build_visnet(**kwargs)
+    model = build_visnet(
+        **kwargs,
+        latent_hamiltonian=True,
+        num_states=2,
+        pooling=["mean", "sum"],
+        hamiltonian_hidden=16,
+    )
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+
+    output = model(z, pos, batch)
+    assert output.shape == (1, 4)
+    energies = output[:, [0, 2]]
+    # Sorted eigenvalues guarantee ascending state energies by construction.
+    assert bool((energies[:, 1] >= energies[:, 0]).all())
+    # Deterministic near-data init keeps the initial spectrum in a sane range.
+    assert float(energies.min()) >= 2.0
+    output.sum().backward()
+    assert model.hamiltonian_mlp[-1].weight.grad is not None
+    assert all(
+        parameter.grad is None
+        for parameter in model.encoder.parameters()
+    )
+
+    checkpoint = {"model_state_dict": donor.state_dict()}
+    load_transfer_checkpoint(model, checkpoint, mode="frozen_sidecar")
+    assert all(
+        not parameter.requires_grad
+        for module in (model.encoder, model.energy_head, model.oscillator_head)
+        for parameter in module.parameters()
+    )
+    assert all(
+        parameter.requires_grad for parameter in model.hamiltonian_mlp.parameters()
+    )
+
+
+def test_latent_hamiltonian_anchor_variant_and_exclusive_flags() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import build_visnet
+
+    kwargs = {
+        "target_columns": ("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    anchored = build_visnet(
+        **kwargs,
+        latent_hamiltonian=True,
+        num_states=2,
+        pooling=["mean"],
+        anchor_production_energies=True,
+        hamiltonian_hidden=16,
+    )
+    z = torch.tensor([6, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [1.1, 0.0, 0.0]])
+    batch = torch.zeros(2, dtype=torch.long)
+    output = anchored(z, pos, batch)
+    assert output.shape == (1, 4)
+    assert float(output.abs().sum()) > 0
+
+    try:
+        build_visnet(**kwargs, latent_hamiltonian=True, spectroscopy_decoder=True)
+    except ValueError as error:
+        assert "Choose one" in str(error)
+    else:
+        raise AssertionError("exclusive architecture flags were accepted together")
