@@ -403,11 +403,10 @@ def test_latent_hamiltonian_per_atom_parameters() -> None:
     assert model.hamiltonian_mlp[-1].weight.grad is not None
     try:
         build_visnet(
-            **{k: v for k, v in {
-                "target_columns": ("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
-                "hidden_channels": 32,
-            }.items()},
+            target_columns=("S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f"),
+            hidden_channels=32,
             latent_hamiltonian=True,
+            num_states=2,
             per_atom_parameters=True,
             anchor_production_energies=True,
         )
