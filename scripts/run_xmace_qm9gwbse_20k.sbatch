@@ -17,7 +17,7 @@
 
 set -euo pipefail
 cd /projects/bhzu/gnn-excited
-mkdir -p runs/xmace_qm9gwbse_20k checkpoints/xmace_qm9gwbse_20k data/processed/qm9gwbse/xmace_20k
+mkdir -p runs/xmace_qm9gwbse_20k/models runs/xmace_qm9gwbse_20k/results runs/xmace_qm9gwbse_20k/logs checkpoints/xmace_qm9gwbse_20k data/processed/qm9gwbse/xmace_20k
 export TMPDIR=${SLURM_TMPDIR:-/tmp/$USER/gnn-excited-$SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
 trap 'rm -rf "$TMPDIR"' EXIT
