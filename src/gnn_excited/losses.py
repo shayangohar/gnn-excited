@@ -27,8 +27,8 @@ def target_layout(target_columns: Sequence[str]) -> tuple[tuple[int, ...], tuple
             oscillator.append((state, index))
         else:
             raise ValueError(f"Unsupported target column {column!r}; expected *_eV or oscillator/*_f")
-    if not energy or not oscillator:
-        raise ValueError("Targets must contain at least one energy and oscillator column")
+    if not energy:
+        raise ValueError("Targets must contain at least one energy column")
     return tuple(index for _, index in sorted(energy)), tuple(index for _, index in sorted(oscillator))
 
 
@@ -90,7 +90,12 @@ def qm9gwbse_loss(
         raise ValueError("prediction and target must have the same shape (batch, targets)")
     energy_indices, oscillator_indices = target_layout(target_columns)
     direct_energy = F.mse_loss(prediction[:, list(energy_indices)], target[:, list(energy_indices)])
-    direct_oscillator = F.mse_loss(prediction[:, list(oscillator_indices)], target[:, list(oscillator_indices)])
+    if oscillator_indices:
+        direct_oscillator = F.mse_loss(
+            prediction[:, list(oscillator_indices)], target[:, list(oscillator_indices)]
+        )
+    else:
+        direct_oscillator = prediction.new_zeros(())
     gap_terms = gap_ordering_loss(
         prediction,
         target,

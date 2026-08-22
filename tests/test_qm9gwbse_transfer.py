@@ -414,3 +414,81 @@ def test_latent_hamiltonian_per_atom_parameters() -> None:
         assert "not supported" in str(error)
     else:
         raise AssertionError("per-atom + anchor combination was accepted")
+
+
+def test_energy_only_loss_and_triplet_hamiltonian_variants() -> None:
+    torch = pytest.importorskip("torch")
+    from gnn_excited.losses import qm9gwbse_loss
+
+    prediction = torch.randn(4, 5, requires_grad=True)
+    target = torch.rand(4, 5) + 4.0
+    total = qm9gwbse_loss(
+        prediction,
+        target,
+        ("T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV"),
+        energy_weight=1.0,
+    )
+    assert torch.isfinite(total)
+    total.backward()
+    assert prediction.grad is not None
+
+    pytest.importorskip("torch_geometric")
+    from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
+
+    base = {
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+
+    t_columns = ("T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV")
+    t_model = build_visnet(
+        target_columns=t_columns,
+        latent_hamiltonian=True,
+        num_states=5,
+        pooling=["mean"],
+        hamiltonian_hidden=16,
+        **base,
+    )
+    t_out = t_model(z, pos, batch)
+    assert t_out.shape == (1, 5)
+    assert bool((t_out[:, 1:] >= t_out[:, :-1]).all())
+
+    st_columns = (
+        "S1_eV", "S2_eV", "S3_eV", "S4_eV", "S5_eV",
+        "T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV",
+    )
+    donor = build_visnet(
+        target_columns=(
+            "S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f",
+            "S3_eV", "log1p_S3_f", "S4_eV", "log1p_S4_f",
+            "S5_eV", "log1p_S5_f",
+        ),
+        **base,
+    )
+    joint = build_visnet(
+        target_columns=st_columns,
+        latent_hamiltonian=True,
+        num_states=5,
+        include_triplet_block=True,
+        anchor_production_energies=True,
+        pooling=["mean"],
+        hamiltonian_hidden=16,
+        **base,
+    )
+    load_transfer_checkpoint(
+        joint, {"model_state_dict": donor.state_dict()}, mode="frozen_sidecar"
+    )
+    assert all(not p.requires_grad for p in joint.encoder.parameters())
+    assert all(p.requires_grad for p in joint.hamiltonian_mlp.parameters())
+    st_out = joint(z, pos, batch)
+    assert st_out.shape == (1, 10)
+    assert bool((st_out[:, 1:5] >= st_out[:, :4]).all())
+    assert bool((st_out[:, 6:10] >= st_out[:, 5:9]).all())
+    st_out.sum().backward()
+    assert joint.hamiltonian_mlp[-1].weight.grad is not None

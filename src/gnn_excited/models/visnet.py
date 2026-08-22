@@ -409,6 +409,7 @@ if nn is not None:
             hamiltonian_hidden: int = 256,
             anchor_production_energies: bool = False,
             per_atom_parameters: bool = False,
+            include_triplet_block: bool = False,
             offdiag_scale: float = 0.5,
             diag_bias_low: float = 3.0,
             diag_bias_high: float = 8.0,
@@ -430,11 +431,41 @@ if nn is not None:
                 raise ValueError(
                     "per_atom_parameters with anchor_production_energies is not supported"
                 )
+            self.include_triplet_block = bool(include_triplet_block)
+            self.singlet_positions = tuple(
+                index
+                for index, column in enumerate(self.target_columns)
+                if str(column).startswith("S") and str(column).endswith("_eV")
+            )
+            self.triplet_positions = tuple(
+                index
+                for index, column in enumerate(self.target_columns)
+                if str(column).startswith("T") and str(column).endswith("_eV")
+            )
+            if self.include_triplet_block:
+                if (
+                    len(self.singlet_positions) != self.num_states
+                    or len(self.triplet_positions) != self.num_states
+                ):
+                    raise ValueError(
+                        "Triplet-block decoder requires S1-S5_eV and T1-T5_eV target columns"
+                    )
+                # Rebuild the inherited heads for the joint spin layout: the
+                # anchor reads production singlet energies (5 outputs) while the
+                # full target set spans both spin manifolds. The loader maps
+                # checkpoint energy_head.* onto anchor_energy_head.*
+                del self.energy_head, self.oscillator_head
+                self.anchor_energy_head = MultiTargetEquivariantScalar(
+                    self.hidden_channels, self.num_states
+                )
             self.offdiag_scale = float(offdiag_scale)
             feature_dim = (
                 self.hidden_channels
                 if self.per_atom_parameters
                 else self.hidden_channels * len(self.poolings)
+            )
+            spectrum_outputs = (2 * self.num_states - 1) * (
+                2 if self.include_triplet_block else 1
             )
             if self.anchor_production_energies:
                 feature_dim += self.num_states
@@ -444,7 +475,7 @@ if nn is not None:
                 nn.SiLU(),
                 nn.Linear(width, width // 2),
                 nn.SiLU(),
-                nn.Linear(width // 2, 2 * self.num_states - 1),
+                nn.Linear(width // 2, spectrum_outputs),
             )
             # Deterministic near-data initialization: zero weights with diagonal
             # biases spanning the excitation range, so the initial Hamiltonian is
@@ -458,7 +489,12 @@ if nn is not None:
                 )
 
         def freeze_scalar_model(self) -> None:
-            for module in (self.encoder, self.energy_head, self.oscillator_head):
+            modules = [self.encoder]
+            if hasattr(self, "anchor_energy_head"):
+                modules.append(self.anchor_energy_head)
+            else:
+                modules.extend([self.energy_head, self.oscillator_head])
+            for module in modules:
                 for parameter in module.parameters():
                     parameter.requires_grad_(False)
 
@@ -480,8 +516,13 @@ if nn is not None:
                     pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
                 )
                 if self.anchor_production_energies:
+                    anchor_source = (
+                        self.anchor_energy_head
+                        if hasattr(self, "anchor_energy_head")
+                        else self.energy_head
+                    )
                     production_energy = scatter(
-                        self.energy_head(scalar, vector),
+                        anchor_source(scalar, vector),
                         batch,
                         dim=0,
                         reduce=self.reduce_op,
@@ -491,24 +532,44 @@ if nn is not None:
                     )
                 parameters = self.hamiltonian_mlp(features)
             states = torch.arange(self.num_states, device=parameters.device)
-            hamiltonian = parameters.new_zeros(
-                (parameters.size(0), self.num_states, self.num_states)
+
+            def _spectrum(block_parameters):
+                diagonal = block_parameters[:, : self.num_states]
+                offdiagonal = self.offdiag_scale * torch.tanh(
+                    block_parameters[:, self.num_states :]
+                )
+                hamiltonian = block_parameters.new_zeros(
+                    (block_parameters.size(0), self.num_states, self.num_states)
+                )
+                hamiltonian[:, states, states] = diagonal
+                adjacent = states[:-1]
+                hamiltonian[:, adjacent, adjacent + 1] = offdiagonal
+                hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
+                return torch.linalg.eigvalsh(hamiltonian)
+
+            output = scalar.new_empty(
+                (parameters.size(0), len(self.target_columns))
             )
-            hamiltonian[:, states, states] = parameters[:, : self.num_states]
-            offdiagonal = self.offdiag_scale * torch.tanh(parameters[:, self.num_states :])
-            adjacent = states[:-1]
-            hamiltonian[:, adjacent, adjacent + 1] = offdiagonal
-            hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
-            energy = torch.linalg.eigvalsh(hamiltonian)
-            oscillator = scatter(
-                self.oscillator_head(scalar, vector),
-                batch,
-                dim=0,
-                reduce=self.reduce_op,
-            )
-            output = scalar.new_empty((energy.size(0), len(self.target_columns)))
-            output[:, list(self.energy_indices)] = energy.to(output.dtype)
-            output[:, list(self.oscillator_indices)] = oscillator.to(output.dtype)
+            if self.include_triplet_block:
+                split = 2 * self.num_states - 1
+                output[:, list(self.singlet_positions)] = _spectrum(
+                    parameters[:, :split]
+                ).to(output.dtype)
+                output[:, list(self.triplet_positions)] = _spectrum(
+                    parameters[:, split:]
+                ).to(output.dtype)
+            else:
+                output[:, list(self.energy_indices)] = _spectrum(parameters).to(
+                    output.dtype
+                )
+            if self.oscillator_indices:
+                oscillator = scatter(
+                    self.oscillator_head(scalar, vector),
+                    batch,
+                    dim=0,
+                    reduce=self.reduce_op,
+                )
+                output[:, list(self.oscillator_indices)] = oscillator.to(output.dtype)
             return output
 
 else:
@@ -623,6 +684,18 @@ def load_transfer_checkpoint(
             "or frozen_sidecar"
         )
     state = _checkpoint_state(checkpoint, map_location)
+    if mode == "frozen_sidecar" and hasattr(model, "anchor_energy_head"):
+        # Joint singlet-triplet variants rebuild heads; map the donor's
+        # production singlet readout onto the anchor head and drop the rest.
+        state = {
+            (
+                f"anchor_energy_head.{key.split('.', 1)[1]}"
+                if key.startswith("energy_head.")
+                else key
+            ): value
+            for key, value in state.items()
+            if not key.startswith("oscillator_head.")
+        }
     if mode == "encoder_finetune":
         encoder_state = {
             key: value for key, value in state.items() if key.startswith("encoder.")
@@ -640,6 +713,23 @@ def load_transfer_checkpoint(
         return model
     missing, unexpected = model.load_state_dict(state, strict=False)
     if mode == "frozen_sidecar":
+        model_parameters = dict(model.named_parameters())
+        loadable_state = {}
+        shape_skipped = []
+        for key, value in state.items():
+            parameter = model_parameters.get(key)
+            if parameter is not None and tuple(parameter.shape) != tuple(value.shape):
+                shape_skipped.append(key)
+            else:
+                loadable_state[key] = value
+        if any(
+            not key.startswith(("energy_head.", "oscillator_head.", "anchor_energy_head."))
+            for key in shape_skipped
+        ):
+            raise ValueError(
+                f"Incompatible frozen-sidecar checkpoint weights: {sorted(shape_skipped)}"
+            )
+        state = loadable_state
         allowed_missing = (
             "state_queries.",
             "dipole_decoder.",
@@ -650,6 +740,7 @@ def load_transfer_checkpoint(
             "transition_refinement.",
             "transition_refinement_gate",
             "hamiltonian_mlp.",
+            "anchor_energy_head.",
         )
         incompatible_missing = [
             key for key in missing if not key.startswith(allowed_missing)
