@@ -41,8 +41,9 @@ def same_spin_adjacent_pairs(target_columns):
     """
     spins = []
     for column in target_columns:
-        match = re.search(r"([ST])\d+", str(column))
-        spins.append(match.group(1) if match else None)
+        text = str(column)
+        match = re.search(r"([ST])\d+", text)
+        spins.append(match.group(1) if match and text.endswith("_eV") else None)
     return [
         (index, index + 1)
         for index in range(len(spins) - 1)
