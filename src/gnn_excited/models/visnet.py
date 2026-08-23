@@ -474,6 +474,7 @@ if nn is not None:
             )
             self.predict_transition_dipoles = bool(predict_transition_dipoles)
             self.eigenvector_conditioning = bool(eigenvector_conditioning)
+            self.stop_gradient_on_eigenvectors = bool(stop_gradient_on_eigenvectors)
             if self.predict_transition_dipoles:
                 self.state_queries = nn.Embedding(self.num_states, self.hidden_channels)
                 self.eigenvector_projection = nn.Linear(
@@ -595,7 +596,6 @@ if nn is not None:
                 hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
                 energies, eigenvectors = torch.linalg.eigh(hamiltonian)
                 dipoles = []
-                stop_grad = bool(stop_gradient_on_eigenvectors)
                 for state_index in range(self.num_states):
                     # Learned query broadcasts over atoms; the molecule-specific
                     # eigenvector projection must be gathered per atom instead.
@@ -604,7 +604,7 @@ if nn is not None:
                     state_scalar = scalar + self.state_queries.weight[state_index]
                     if self.eigenvector_conditioning:
                         eigvec = eigenvectors[:, :, state_index]
-                        if stop_gradient_on_eigenvectors:
+                        if self.stop_gradient_on_eigenvectors:
                             eigvec = eigvec.detach()
                         state_scalar = (
                             state_scalar
