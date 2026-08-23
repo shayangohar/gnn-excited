@@ -410,6 +410,8 @@ if nn is not None:
             anchor_production_energies: bool = False,
             per_atom_parameters: bool = False,
             include_triplet_block: bool = False,
+            predict_transition_dipoles: bool = False,
+            eigenvector_conditioning: bool = True,
             offdiag_scale: float = 0.5,
             diag_bias_low: float = 3.0,
             diag_bias_high: float = 8.0,
@@ -469,6 +471,26 @@ if nn is not None:
             spectrum_outputs = (2 * self.num_states - 1) * (
                 2 if self.include_triplet_block else 1
             )
+            self.predict_transition_dipoles = bool(predict_transition_dipoles)
+            self.eigenvector_conditioning = bool(eigenvector_conditioning)
+            if self.predict_transition_dipoles:
+                self.state_queries = nn.Embedding(self.num_states, self.hidden_channels)
+                self.eigenvector_projection = nn.Linear(
+                    self.num_states, self.hidden_channels
+                )
+                self.dipole_decoder = nn.ModuleList(
+                    [
+                        GatedEquivariantBlock(
+                            self.hidden_channels,
+                            self.hidden_channels // 2,
+                            scalar_activation=True,
+                        ),
+                        GatedEquivariantBlock(self.hidden_channels // 2, 1),
+                    ]
+                )
+                if not self.eigenvector_conditioning:
+                    nn.init.zeros_(self.eigenvector_projection.weight)
+                    nn.init.zeros_(self.eigenvector_projection.bias)
             if self.anchor_production_energies:
                 feature_dim += self.num_states
             width = int(hamiltonian_hidden)
@@ -552,18 +574,59 @@ if nn is not None:
             output = scalar.new_empty(
                 (parameters.size(0), len(self.target_columns))
             )
+            transition_dipoles = None
+            energies_for_output = None
+            if self.predict_transition_dipoles:
+                split = 2 * self.num_states - 1 if self.include_triplet_block else None
+                block_parameters = (
+                    parameters[:, :split] if split is not None else parameters
+                )
+                diagonal = block_parameters[:, : self.num_states]
+                offdiagonal = self.offdiag_scale * torch.tanh(
+                    block_parameters[:, self.num_states :]
+                )
+                hamiltonian = block_parameters.new_zeros(
+                    (block_parameters.size(0), self.num_states, self.num_states)
+                )
+                hamiltonian[:, states, states] = diagonal
+                adjacent = states[:-1]
+                hamiltonian[:, adjacent, adjacent + 1] = offdiagonal
+                hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
+                energies, eigenvectors = torch.linalg.eigh(hamiltonian)
+                dipoles = []
+                for state_index in range(self.num_states):
+                    conditioning = self.state_queries.weight[state_index]
+                    if self.eigenvector_conditioning:
+                        conditioning = conditioning + self.eigenvector_projection(
+                            eigenvectors[:, :, state_index]
+                        )
+                    state_scalar = scalar + conditioning[batch]
+                    state_vector = vector
+                    for layer in self.dipole_decoder:
+                        state_scalar, state_vector = layer(state_scalar, state_vector)
+                    dipoles.append(
+                        scatter(state_vector, batch, dim=0, reduce="sum").squeeze(-1)
+                    )
+                transition_dipoles = torch.stack(dipoles, dim=1)
+                energies_for_output = energies
+
+            def _place(block_values, positions):
+                output[:, list(positions)] = block_values.to(output.dtype)
+
             if self.include_triplet_block:
                 split = 2 * self.num_states - 1
-                output[:, list(self.singlet_positions)] = _spectrum(
-                    parameters[:, :split]
-                ).to(output.dtype)
-                output[:, list(self.triplet_positions)] = _spectrum(
-                    parameters[:, split:]
-                ).to(output.dtype)
-            else:
-                output[:, list(self.energy_indices)] = _spectrum(parameters).to(
-                    output.dtype
+                singlet_energies = (
+                    energies_for_output[:, : self.num_states]
+                    if self.predict_transition_dipoles
+                    else _spectrum(parameters[:, :split])
                 )
+                _place(singlet_energies, self.singlet_positions)
+                _place(_spectrum(parameters[:, split:]), self.triplet_positions)
+            elif self.predict_transition_dipoles:
+                _place(energies_for_output, self.energy_indices)
+            else:
+                _place(_spectrum(parameters), self.energy_indices)
+            del energies_for_output
             if self.oscillator_indices:
                 oscillator = scatter(
                     self.oscillator_head(scalar, vector),
@@ -572,6 +635,8 @@ if nn is not None:
                     reduce=self.reduce_op,
                 )
                 output[:, list(self.oscillator_indices)] = oscillator.to(output.dtype)
+            if transition_dipoles is not None:
+                return output, transition_dipoles
             return output
 
 else:
@@ -744,6 +809,7 @@ def load_transfer_checkpoint(
             "hamiltonian_mlp.",
             "anchor_energy_head.",
             "oscillator_head.",
+            "eigenvector_projection.",
         )
         incompatible_missing = [
             key for key in missing if not key.startswith(allowed_missing)

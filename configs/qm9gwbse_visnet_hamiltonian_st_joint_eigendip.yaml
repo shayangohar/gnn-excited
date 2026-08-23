@@ -1,0 +1,82 @@
+model:
+  type: visnet
+  hidden_channels: 216
+  num_layers: 3
+  num_rbf: 25
+  cutoff: 5.0
+  max_num_neighbors: 100
+  reduce_op: mean
+  latent_hamiltonian: true
+  num_states: 5
+  pooling:
+  - mean
+  - sum
+  anchor_production_energies: true
+  include_triplet_block: true
+  predict_transition_dipoles: true
+dataset:
+  type: qm9gwbse
+  hdf5_path: data/processed/qm9gwbse/qm9gwbse.h5
+  manifest_path: data/processed/qm9gwbse/manifest.csv
+  split_path: data/processed/qm9gwbse/splits.csv
+  split_column: random_split
+  local_copy: true
+  split_seed: 17
+targets:
+  columns:
+  - S1_eV
+  - S2_eV
+  - S3_eV
+  - S4_eV
+  - S5_eV
+  - T1_eV
+  - T2_eV
+  - T3_eV
+  - T4_eV
+  - T5_eV
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 0.0
+  gap_weight: 0.0
+  ordering_weight: 0.0
+  dipole_weight: 0.1
+transfer:
+  checkpoint_path: checkpoints/visnet_qm9gwbse_full_finetune.pt
+  mode: frozen_sidecar
+training:
+  device: cuda
+  seed: 17
+  epochs: 50
+  batch_size: 16
+  learning_rate: 0.0005
+  weight_decay: 0.001
+  max_grad_norm: 1.0
+  dataloader:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+  scheduler:
+    type: warmup_cosine
+    warmup_epochs: 5
+    start_factor: 0.0033333333333333335
+    min_lr: 1.0e-05
+  checkpoint_path: checkpoints/visnet_qm9gwbse_hamiltonian_st_joint_eigendip.pt
+  metrics_csv_path: runs/visnet_qm9gwbse_hamiltonian_st_joint_eigendip.metrics.csv
+  summary_json_path: runs/visnet_qm9gwbse_hamiltonian_st_joint_eigendip.summary.json
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: visnet_qm9gwbse_hamiltonian_st_joint_eigendip
+  group: qm9gwbse-hamiltonian-decoder
+  tags:
+  - QM9GWBSE
+  - S-T
+  - ViSNet
+  - qsGW-BSE
+  - latent-hamiltonian
+  - joint-spin-manifold
+  - eigenvector-conditioning
+  - transition-dipoles

@@ -505,3 +505,79 @@ def test_same_spin_adjacent_pairs_excludes_cross_manifold() -> None:
     assert pairs == [(0, 1), (1, 2), (2, 3), (3, 4), (5, 6), (6, 7), (7, 8), (8, 9)]
     assert (4, 5) not in pairs
     assert same_spin_adjacent_pairs(("S1_eV", "S2_eV")) == [(0, 1)]
+
+
+def test_eigenvector_conditioned_dipole_head() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
+
+    base = {
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+    donor = build_visnet(
+        target_columns=(
+            "S1_eV", "log1p_S1_f", "S2_eV", "log1p_S2_f",
+            "S3_eV", "log1p_S3_f", "S4_eV", "log1p_S4_f",
+            "S5_eV", "log1p_S5_f",
+        ),
+        **base,
+    )
+    model = build_visnet(
+        target_columns=(
+            "S1_eV", "S2_eV", "S3_eV", "S4_eV", "S5_eV",
+            "T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV",
+        ),
+        latent_hamiltonian=True,
+        num_states=5,
+        include_triplet_block=True,
+        anchor_production_energies=True,
+        predict_transition_dipoles=True,
+        pooling=["mean"],
+        hamiltonian_hidden=16,
+        **base,
+    )
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+
+    output, dipoles = model(z, pos, batch)
+    assert output.shape == (1, 10)
+    assert dipoles.shape == (1, 5, 3)
+    assert torch.isfinite(dipoles).all()
+    (output.sum() + dipoles.abs().sum()).backward()
+    assert model.hamiltonian_mlp[-1].weight.grad is not None
+    assert model.eigenvector_projection.weight.grad is not None
+    assert model.state_queries.weight.grad is not None
+    assert all(not p.requires_grad for p in model.encoder.parameters())
+
+    load_transfer_checkpoint(
+        model, {"model_state_dict": donor.state_dict()}, mode="frozen_sidecar"
+    )
+    assert all(
+        not parameter.requires_grad
+        for module in (model.encoder, model.anchor_energy_head)
+        for parameter in module.parameters()
+    )
+
+    query_only = build_visnet(
+        target_columns=(
+            "S1_eV", "S2_eV", "S3_eV", "S4_eV", "S5_eV",
+            "T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV",
+        ),
+        latent_hamiltonian=True,
+        num_states=5,
+        include_triplet_block=True,
+        anchor_production_energies=True,
+        predict_transition_dipoles=True,
+        eigenvector_conditioning=False,
+        pooling=["mean"],
+        hamiltonian_hidden=16,
+        **base,
+    )
+    out_q, dip_q = query_only(z, pos, batch)
+    assert out_q.shape == (1, 10) and dip_q.shape == (1, 5, 3)
