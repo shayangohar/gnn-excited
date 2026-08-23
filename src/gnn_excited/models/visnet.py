@@ -595,12 +595,16 @@ if nn is not None:
                 energies, eigenvectors = torch.linalg.eigh(hamiltonian)
                 dipoles = []
                 for state_index in range(self.num_states):
-                    conditioning = self.state_queries.weight[state_index]
+                    # Learned query broadcasts over atoms; the molecule-specific
+                    # eigenvector projection must be gathered per atom instead.
+                    state_scalar = scalar + self.state_queries.weight[state_index]
                     if self.eigenvector_conditioning:
-                        conditioning = conditioning + self.eigenvector_projection(
-                            eigenvectors[:, :, state_index]
+                        state_scalar = (
+                            state_scalar
+                            + self.eigenvector_projection(
+                                eigenvectors[:, :, state_index]
+                            )[batch]
                         )
-                    state_scalar = scalar + conditioning[batch]
                     state_vector = vector
                     for layer in self.dipole_decoder:
                         state_scalar, state_vector = layer(state_scalar, state_vector)
