@@ -32,6 +32,24 @@ def target_layout(target_columns: Sequence[str]) -> tuple[tuple[int, ...], tuple
     return tuple(index for _, index in sorted(energy)), tuple(index for _, index in sorted(oscillator))
 
 
+def same_spin_adjacent_pairs(target_columns):
+    """Return index pairs of adjacent energy columns sharing a spin prefix.
+
+    Cross-manifold adjacency (e.g. S5_eV followed by T1_eV) carries no ordering
+    constraint because triplet states sit below high singlet states physically;
+    ordering violations must only be counted within each spin block.
+    """
+    spins = []
+    for column in target_columns:
+        match = re.search(r"([ST])\d+", str(column))
+        spins.append(match.group(1) if match else None)
+    return [
+        (index, index + 1)
+        for index in range(len(spins) - 1)
+        if spins[index] is not None and spins[index] == spins[index + 1]
+    ]
+
+
 def gap_ordering_loss(
     prediction,
     target,

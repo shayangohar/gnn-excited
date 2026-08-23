@@ -31,7 +31,11 @@ from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, ex
 from gnn_excited.data.qm9gwbse import QM9GWBSEDataset, electronic_descriptor_keys
 from gnn_excited.models.dimenetpp import build_dimenetpp
 from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
-from gnn_excited.losses import phase_invariant_vector_squared_error, qm9gwbse_loss
+from gnn_excited.losses import (
+    phase_invariant_vector_squared_error,
+    qm9gwbse_loss,
+    same_spin_adjacent_pairs,
+)
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -501,8 +505,19 @@ def batch_mae(
         target_gaps = target_energy[:, 1:] - target_energy[:, :-1]
         gap_errors = (pred_gaps - target_gaps).abs()
         metrics['adjacent_gap_eV_mae'] = gap_errors.mean().item()
-        metrics['ordering_violation_count'] = float((pred_gaps <= 0).sum().item())
-        metrics['ordering_comparison_count'] = float(pred_gaps.numel())
+        spin_pairs = same_spin_adjacent_pairs(
+            [target_columns[index] for index in energy_indices]
+        )
+        if spin_pairs:
+            metrics['ordering_violation_count'] = float(
+                sum(int((pred_gaps[:, position] <= 0).sum().item()) for position, _ in spin_pairs)
+            )
+            metrics['ordering_comparison_count'] = float(
+                len(spin_pairs) * pred_gaps.size(0)
+            )
+        else:
+            metrics['ordering_violation_count'] = 0.0
+            metrics['ordering_comparison_count'] = 0.0
         for gap_index, (left_index, right_index) in enumerate(zip(energy_indices[:-1], energy_indices[1:])):
             left = target_columns[left_index].removesuffix('_eV')
             right = target_columns[right_index].removesuffix('_eV')

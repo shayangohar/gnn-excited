@@ -492,3 +492,16 @@ def test_energy_only_loss_and_triplet_hamiltonian_variants() -> None:
     assert bool((st_out[:, 6:10] >= st_out[:, 5:9]).all())
     st_out.sum().backward()
     assert joint.hamiltonian_mlp[-1].weight.grad is not None
+
+
+def test_same_spin_adjacent_pairs_excludes_cross_manifold() -> None:
+    from gnn_excited.losses import same_spin_adjacent_pairs
+
+    columns = (
+        "S1_eV", "S2_eV", "S3_eV", "S4_eV", "S5_eV",
+        "T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV",
+    )
+    pairs = same_spin_adjacent_pairs(columns)
+    assert pairs == [(0, 1), (1, 2), (2, 3), (3, 4), (5, 6), (6, 7), (7, 8), (8, 9)]
+    assert (4, 5) not in pairs
+    assert same_spin_adjacent_pairs(("S1_eV", "S2_eV")) == [(0, 1)]
