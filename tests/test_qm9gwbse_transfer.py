@@ -580,3 +580,50 @@ def test_eigenvector_conditioned_dipole_head() -> None:
     )
     out_q, dip_q = query_only(z, pos, batch)
     assert out_q.shape == (1, 10) and dip_q.shape == (1, 5, 3)
+
+
+def test_stop_gradient_decouples_dipole_loss_from_spectrum() -> None:
+    pytest.importorskip("torch_geometric")
+    torch = pytest.importorskip("torch")
+    from gnn_excited.models.visnet import build_visnet
+
+    columns = (
+        "S1_eV", "S2_eV", "S3_eV", "S4_eV", "S5_eV",
+        "T1_eV", "T2_eV", "T3_eV", "T4_eV", "T5_eV",
+    )
+    z = torch.tensor([6, 1, 1], dtype=torch.long)
+    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+    batch = torch.zeros(3, dtype=torch.long)
+
+    base_kwargs = {
+        "hidden_channels": 32,
+        "num_layers": 1,
+        "num_rbf": 8,
+        "cutoff": 3.0,
+        "max_num_neighbors": 8,
+    }
+
+    def build(**extra):
+        return build_visnet(
+            target_columns=columns,
+            latent_hamiltonian=True,
+            num_states=5,
+            include_triplet_block=True,
+            anchor_production_energies=True,
+            predict_transition_dipoles=True,
+            pooling=["mean"],
+            hamiltonian_hidden=16,
+            **base_kwargs,
+            **extra,
+        )
+
+    coupled = build()
+    _, dipoles = coupled(z, pos, batch)
+    dipoles.abs().sum().backward()
+    assert coupled.hamiltonian_mlp[-1].weight.grad is not None
+
+    detached = build(stop_gradient_on_eigenvectors=True)
+    _, dipoles_d = detached(z, pos, batch)
+    dipoles_d.abs().sum().backward()
+    assert detached.hamiltonian_mlp[-1].weight.grad is None
+    assert detached.eigenvector_projection.weight.grad is not None

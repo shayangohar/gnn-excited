@@ -412,6 +412,7 @@ if nn is not None:
             include_triplet_block: bool = False,
             predict_transition_dipoles: bool = False,
             eigenvector_conditioning: bool = True,
+            stop_gradient_on_eigenvectors: bool = False,
             offdiag_scale: float = 0.5,
             diag_bias_low: float = 3.0,
             diag_bias_high: float = 8.0,
@@ -594,16 +595,20 @@ if nn is not None:
                 hamiltonian[:, adjacent + 1, adjacent] = offdiagonal
                 energies, eigenvectors = torch.linalg.eigh(hamiltonian)
                 dipoles = []
+                stop_grad = bool(stop_gradient_on_eigenvectors)
                 for state_index in range(self.num_states):
                     # Learned query broadcasts over atoms; the molecule-specific
                     # eigenvector projection must be gathered per atom instead.
+                    # With stop_gradient_on_eigenvectors the spectral character
+                    # is a pure input: no dipole gradient reaches the spectrum.
                     state_scalar = scalar + self.state_queries.weight[state_index]
                     if self.eigenvector_conditioning:
+                        eigvec = eigenvectors[:, :, state_index]
+                        if stop_gradient_on_eigenvectors:
+                            eigvec = eigvec.detach()
                         state_scalar = (
                             state_scalar
-                            + self.eigenvector_projection(
-                                eigenvectors[:, :, state_index]
-                            )[batch]
+                            + self.eigenvector_projection(eigvec)[batch]
                         )
                     state_vector = vector
                     for layer in self.dipole_decoder:
