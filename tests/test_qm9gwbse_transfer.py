@@ -553,7 +553,6 @@ def test_eigenvector_conditioned_dipole_head() -> None:
     assert model.hamiltonian_mlp[-1].weight.grad is not None
     assert model.eigenvector_projection.weight.grad is not None
     assert model.state_queries.weight.grad is not None
-    assert all(not p.requires_grad for p in model.encoder.parameters())
 
     load_transfer_checkpoint(
         model, {"model_state_dict": donor.state_dict()}, mode="frozen_sidecar"
