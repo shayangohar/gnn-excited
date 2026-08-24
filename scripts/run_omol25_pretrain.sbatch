@@ -2,7 +2,7 @@
 #SBATCH --job-name=omol_pre
 #SBATCH --output=runs/%x.%j.%N.out
 #SBATCH --error=runs/%x.%j.%N.err
-#SBATCH --partition=gpuH200
+#SBATCH --partition=gpuH200x8
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
