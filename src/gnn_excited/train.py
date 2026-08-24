@@ -525,6 +525,123 @@ def batch_mae(
     return metrics
 
 
+def evaluate_ensemble(
+    model,
+    checkpoint_paths,
+    loader,
+    device: str,
+    target_columns,
+    config=None,
+):
+    """Compute metrics on the AVERAGED predictions of N checkpoints.
+
+    Members are loaded sequentially into the same model instance; loaders must
+    be deterministic (shuffle=False). Only energy columns participate in
+    aggregate/ordering metrics; within-spin adjacency rules apply.
+    """
+    target_dim = len(target_columns)
+    energy_positions = [
+        index for index, column in enumerate(target_columns)
+        if str(column).endswith('_eV')
+    ]
+    spin_pairs = same_spin_adjacent_pairs(
+        [target_columns[index] for index in energy_positions]
+    )
+    prediction_sum = None
+    target_store = []
+    member_aggregates = []
+    with torch.no_grad():
+        for path in checkpoint_paths:
+            state = torch.load(path, map_location=device)
+            if isinstance(state, dict) and 'model_state_dict' in state:
+                state = state['model_state_dict']
+            model.load_state_dict(state)
+            model.eval()
+            member_sum = None
+            member_energy_abs = 0.0
+            member_n = 0
+            row_index = 0
+            for batch in loader:
+                batch = batch.to(device)
+                target = batch.y.view(-1, target_dim)
+                prediction, _ = _forward_model(model, batch, target_dim)
+                prediction = prediction.detach().float()
+                member_sum = (
+                    prediction if member_sum is None else member_sum + prediction
+                )
+                member_energy_abs += float(
+                    (
+                        prediction[:, energy_positions] - target[:, energy_positions]
+                    ).abs().sum().item()
+                )
+                member_n += target.shape[0]
+                if len(target_store) < total_rows_hint(loader):
+                    target_store.append(target.detach().cpu())
+                row_index += member_n
+            del row_index
+            member_aggregates.append(member_energy_abs / max(member_n, 1))
+            prediction_sum = (
+                member_sum if prediction_sum is None else prediction_sum + member_sum
+            )
+    del total_n
+    mean_prediction = prediction_sum / float(len(checkpoint_paths))
+    target_all = torch.cat(target_store, dim=0).to(mean_prediction.device)
+
+    metrics: dict[str, float] = {}
+    for index, column in enumerate(target_columns):
+        metrics[f'{column}_mae'] = (
+            (mean_prediction[:, index] - target_all[:, index]).abs().mean().item()
+        )
+    energy_values = [target_all[:, index] for index in energy_positions]
+    pred_energy = mean_prediction[:, energy_positions]
+    target_energy = torch.stack(energy_values, dim=1)
+    metrics['energy_eV_mae'] = (
+        (pred_energy - target_energy).abs().mean().item()
+    )
+    prefixes = sorted({str(target_columns[i])[:1] for i in energy_positions})
+    for prefix in prefixes:
+        positions = [
+            p for p in energy_positions if str(target_columns[p]).startswith(prefix)
+        ]
+        if len(positions) > 1:
+            metrics[f'{prefix}manifold_eV_mae'] = (
+                (
+                    mean_prediction[:, positions] - target_all[:, positions]
+                ).abs().mean().item()
+            )
+    if len(energy_positions) > 1:
+        pred_gaps = pred_energy[:, 1:] - pred_energy[:, :-1]
+        target_gaps = target_energy[:, 1:] - target_energy[:, :-1]
+        gap_errors = (pred_gaps - target_gaps).abs()
+        metrics['adjacent_gap_eV_mae'] = gap_errors.mean().item()
+        for gap_index, (left, right) in enumerate(
+            zip(energy_positions[:-1], energy_positions[1:])
+        ):
+            left_name = str(target_columns[left]).removesuffix('_eV')
+            right_name = str(target_columns[right]).removesuffix('_eV')
+            metrics[f'{left_name}_{right_name}_gap_eV_mae'] = (
+                gap_errors[:, gap_index].mean().item()
+            )
+        if spin_pairs:
+            metrics['ordering_violation_count'] = float(
+                sum(int((pred_gaps[:, position] <= 0).sum().item()) for position, _ in spin_pairs)
+            )
+            metrics['ordering_comparison_count'] = float(
+                len(spin_pairs) * pred_gaps.size(0)
+            )
+            metrics['ordering_violation_rate'] = (
+                metrics['ordering_violation_count']
+                / metrics['ordering_comparison_count']
+            )
+    for member_index, value in enumerate(member_aggregates):
+        metrics[f'member_{member_index}_energy_eV_mae'] = value
+    return metrics
+
+
+def total_rows_hint(loader):
+    return getattr(getattr(loader, 'dataset', None), '__len__', lambda: 0)()
+
+
 def evaluate(
     model,
     loader,
@@ -810,10 +927,18 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     model = model_builder(**model_kwargs).to(device)
     evaluation_cfg = config.get('evaluation') or {}
     evaluation_checkpoint = evaluation_cfg.get('checkpoint_path')
+    evaluation_checkpoint_paths = list(evaluation_cfg.get('checkpoint_paths') or [])
+    if evaluation_checkpoint and evaluation_checkpoint_paths:
+        raise ValueError(
+            'evaluation.checkpoint_path and evaluation.checkpoint_paths are mutually exclusive'
+        )
+    evaluation_mode = bool(evaluation_checkpoint) or bool(evaluation_checkpoint_paths)
     transfer_cfg = config.get('transfer') or train_cfg.get('transfer') or {}
     transfer_checkpoint = transfer_cfg.get('checkpoint_path')
     if evaluation_checkpoint and transfer_checkpoint:
         raise ValueError('evaluation.checkpoint_path and transfer.checkpoint_path are mutually exclusive')
+    if evaluation_checkpoint_paths and transfer_checkpoint:
+        raise ValueError('evaluation.checkpoint_paths and transfer.checkpoint_path are mutually exclusive')
     if transfer_checkpoint:
         transfer_mode = str(transfer_cfg.get('mode', 'readout_only'))
         if model_type not in {'visnet', 'visnet_one_pass'}:
@@ -828,11 +953,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if loss_weights_tensor is not None:
         loss_weights_tensor = loss_weights_tensor.to(device)
     epochs = int(train_cfg['epochs'])
-    if not evaluation_checkpoint and epochs < 1:
+    if not evaluation_mode and epochs < 1:
         raise ValueError('training.epochs must be positive unless evaluation.checkpoint_path is set')
     optimizer = None
     scheduler = None
-    if not evaluation_checkpoint:
+    if not evaluation_mode:
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=float(train_cfg['learning_rate']),
@@ -1034,7 +1159,17 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             model.load_state_dict(checkpoint['model_state_dict'])
 
         predictions_csv_path = evaluation_cfg.get('predictions_csv_path')
-        test_metrics = evaluate(
+        if evaluation_checkpoint_paths:
+            test_metrics = evaluate_ensemble(
+                model,
+                evaluation_checkpoint_paths,
+                test_loader,
+                device,
+                target_columns,
+                config,
+            )
+        else:
+            test_metrics = evaluate(
             model,
             test_loader,
             device,

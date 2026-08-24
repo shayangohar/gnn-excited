@@ -1,0 +1,68 @@
+model:
+  type: visnet
+  hidden_channels: 216
+  num_layers: 3
+  num_rbf: 25
+  cutoff: 5.0
+  max_num_neighbors: 100
+  reduce_op: mean
+  latent_hamiltonian: true
+  num_states: 5
+  pooling:
+  - mean
+  - sum
+  anchor_production_energies: true
+dataset:
+  type: qm9gwbse
+  hdf5_path: data/processed/qm9gwbse/qm9gwbse.h5
+  manifest_path: data/processed/qm9gwbse/manifest.csv
+  split_path: data/processed/qm9gwbse/splits.csv
+  split_column: random_split
+  local_copy: true
+  split_seed: 17
+targets:
+  columns:
+  - S1_eV
+  - log1p_S1_f
+  - S2_eV
+  - log1p_S2_f
+  - S3_eV
+  - log1p_S3_f
+  - S4_eV
+  - log1p_S4_f
+  - S5_eV
+  - log1p_S5_f
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 0.0
+  gap_weight: 0.0
+  ordering_weight: 0.0
+transfer:
+  checkpoint_path: checkpoints/visnet_qm9gwbse_full_finetune.pt
+  mode: frozen_sidecar
+training:
+  device: cuda
+  seed: 17
+  epochs: 0
+  checkpoint_path: checkpoints/anchor_ensemble_eval.pt
+  metrics_csv_path: runs/anchor_ensemble_eval.metrics.csv
+  summary_json_path: runs/anchor_ensemble_eval.summary.json
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: visnet_qm9gwbse_anchor_ensemble_eval
+  group: qm9gwbse-hamiltonian-decoder
+  tags:
+  - QM9GWBSE
+  - S1-S5
+  - ensemble-eval
+  - promoted
+evaluation:
+  checkpoint_paths:
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s17.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s18.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s19.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s20.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_frozen.pt
