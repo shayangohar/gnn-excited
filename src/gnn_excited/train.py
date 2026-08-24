@@ -29,6 +29,7 @@ else:
 
 from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, explicit_split
 from gnn_excited.data.qm9gwbse import QM9GWBSEDataset, electronic_descriptor_keys
+from gnn_excited.data.omol25 import Omol25GapDataset
 from gnn_excited.models.dimenetpp import build_dimenetpp
 from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
 from gnn_excited.losses import (
@@ -887,7 +888,12 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         }
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
     dataset_type = str(dataset_cfg.get('type', 'qcdge')).lower()
-    dataset_class = QM9GWBSEDataset if dataset_type in {'qm9gwbse', 'qm9-gwbse'} else QCDGES1Dataset
+    if dataset_type == 'omol25':
+        dataset_class = Omol25GapDataset
+    elif dataset_type in {'qm9gwbse', 'qm9-gwbse'}:
+        dataset_class = QM9GWBSEDataset
+    else:
+        dataset_class = QCDGES1Dataset
     def make_dataset(indices):
         args = (
             effective_hdf5_path,

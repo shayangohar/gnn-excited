@@ -1,0 +1,51 @@
+model:
+  type: visnet
+  hidden_channels: 216
+  num_layers: 5
+  num_rbf: 32
+  cutoff: 6.0
+  max_num_neighbors: 100
+  reduce_op: mean
+  num_features: 100
+
+dataset:
+  type: omol25
+  hdf5_path: data/processed/omol25/train4m_gap_all.h5
+  manifest_path: data/processed/omol25/train4m_gap_all_train_manifest.csv
+  local_copy: false
+  report_subset_metrics: false
+  split_seed: 17
+  train_fraction: 0.95
+  val_fraction: 0.05
+
+targets:
+  columns:
+    - gap
+
+loss:
+  type: mse
+
+training:
+  device: cuda
+  seed: 17
+  epochs: 8
+  batch_size: 64
+  learning_rate: 0.0003
+  weight_decay: 0.001
+  max_grad_norm: 1.0
+  dataloader:
+    num_workers: 12
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+  scheduler:
+    type: warmup_cosine
+    warmup_epochs: 1
+    start_factor: 0.0033333333333333335
+    min_lr: 0.00001
+  checkpoint_path: checkpoints/omol25_gap_pretrain.pt
+  metrics_csv_path: runs/omol25_gap_pretrain.metrics.csv
+  summary_json_path: runs/omol25_gap_pretrain.summary.json
+
+wandb:
+  enabled: true
