@@ -17,5 +17,5 @@ source /etc/profile.d/modules.sh
 module purge
 source envs/gnn-excited-delta/bin/activate
 CONFIG_PATH=${CONFIG_PATH:-configs/omol25_gap_pretrain.yaml}
-python -m gnn_excited.cli.train --config "$CONFIG_PATH"
+python scripts/train_dimenet.py --config "$CONFIG_PATH"
 echo PRETRAIN_DONE
