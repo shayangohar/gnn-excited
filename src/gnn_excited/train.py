@@ -576,7 +576,9 @@ def evaluate_ensemble(
                 count += target.shape[0]
                 if member_index == 0:
                     target_store.append(target.detach().cpu())
-            member_aggregates.append(energy_abs / max(count, 1))
+            member_aggregates.append(
+                energy_abs / max(count * max(len(energy_positions), 1), 1)
+            )
             member_predictions.append(torch.cat(rows, dim=0))
     mean_prediction = torch.stack(member_predictions, dim=0).mean(dim=0)
     target_all = torch.cat(target_store, dim=0).to(mean_prediction.device)
