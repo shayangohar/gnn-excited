@@ -32,10 +32,11 @@ else
     echo "[extract] train_4M"; mkdir -p "$DEST/train_4M"
     tar -xzf "$DEST/train_4M.tar.gz" -C "$DEST/train_4M"
   fi
+  ELEMENTS=${ELEMENTS:-all}; ATOMS=${ATOMS:-64}
   python scripts/convert_omol25_lmdb.py \
     --lmdb-dir "$DEST/train_4M" \
-    --out-h5 data/processed/omol25/train4m_gap.h5 \
-    --manifest data/processed/omol25/train4m_gap_manifest.csv \
-    --max-atoms 32
+    --out-h5 data/processed/omol25/train4m_gap_${ELEMENTS}.h5 \
+    --manifest data/processed/omol25/train4m_gap_${ELEMENTS}_manifest.csv \
+    --max-atoms $ATOMS --elements $ELEMENTS
 fi
 echo CONVERT_STAGE_DONE

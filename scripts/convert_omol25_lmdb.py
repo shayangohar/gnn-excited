@@ -20,6 +20,14 @@ from ase.db import connect
 ALLOWED_Z = {1, 6, 7, 8, 9}
 
 
+def as_scalar(value):
+    """Coerce a label to float; returns None for missing/ambiguous arrays."""
+    if value is None:
+        return None
+    array = np.ravel(np.asarray(value, dtype=float))
+    return float(array[0]) if array.size == 1 else None
+
+
 def split_for(mol_id: str, val_fraction: float = 0.1) -> str:
     digest = hashlib.sha256(mol_id.encode()).hexdigest()
     return "val" if int(digest[:16], 16) % 10_000 < val_fraction * 10_000 else "train"
@@ -31,6 +39,10 @@ def main() -> None:
     parser.add_argument("--out-h5", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--max-atoms", type=int, default=32)
+    parser.add_argument(
+        "--elements", choices=["HCNOF", "all"], default="HCNOF",
+        help="HCNOF restricts composition; all keeps every element",
+    )
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
 
@@ -58,19 +70,19 @@ def main() -> None:
                 if scanned % 50_000 == 0:
                     print(f"scanned={scanned} kept={kept}", flush=True)
                 data = getattr(row, "_data", None) or {}
-                gap = data.get("homo_lumo_gap")
+                gap = as_scalar(data.get("homo_lumo_gap"))
+                homo = as_scalar(data.get("homo_energy"))
                 if gap is None:
                     skipped_label += 1
                     continue
                 atoms = row.toatoms()
                 numbers = atoms.get_atomic_numbers()
-                if not set(numbers.tolist()) <= ALLOWED_Z:
+                if args.elements == "HCNOF" and not set(numbers.tolist()) <= ALLOWED_Z:
                     skipped_elem += 1
                     continue
                 if len(atoms) > args.max_atoms:
                     skipped_size += 1
                     continue
-                homo = data.get("homo_energy")
                 mol_id = (
                     f"omol_{hashlib.sha256(str(row.id).encode()).hexdigest()[:12]}"
                     f"_{shard.stem}"
