@@ -27,6 +27,6 @@ for F in train_4M.tar.gz neutral_val.tar.gz; do
   echo "[size] $(du -h "$F" | cut -f1) $F"
 done
 echo "[smoke] tarball listings:"
-tar -tzf train_4M.tar.gz | head -5
-tar -tzf neutral_val.tar.gz | head -5
+tar -tzf train_4M.tar.gz | head -5 || true
+tar -tzf neutral_val.tar.gz | head -5 || true
 echo FETCH_DONE
