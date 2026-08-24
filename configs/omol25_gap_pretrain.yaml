@@ -20,7 +20,7 @@ dataset:
 
 targets:
   columns:
-    - gap
+    - gap_eV
 
 loss:
   type: mse
