@@ -16,7 +16,7 @@ dataset:
   report_subset_metrics: false
   split_seed: 17
   train_fraction: 0.95
-  val_fraction: 0.05
+  val_fraction: 0.025
 
 targets:
   columns:
