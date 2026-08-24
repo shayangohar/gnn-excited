@@ -18,7 +18,7 @@ DEST=/work/hdd/bhzu/gnn-excited/data/omol25
 mkdir -p "$DEST"
 cd "$DEST"
 BASE=https://dl.fbaipublicfiles.com/opencatalystproject/data/omol/250514
-for F in train_4M.tar.gz val_neutral.tar.gz; do
+for F in train_4M.tar.gz neutral_val.tar.gz; do
   if [ ! -s "$F" ]; then
     echo "[fetch] $F"
     curl -fL --retry 5 --retry-delay 10 -o "$F.part" "$BASE/$F"
@@ -28,5 +28,5 @@ for F in train_4M.tar.gz val_neutral.tar.gz; do
 done
 echo "[smoke] tarball listings:"
 tar -tzf train_4M.tar.gz | head -5
-tar -tzf val_neutral.tar.gz | head -5
+tar -tzf neutral_val.tar.gz | head -5
 echo FETCH_DONE
