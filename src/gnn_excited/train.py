@@ -579,9 +579,19 @@ def evaluate_ensemble(
                     target_store.append(target.detach().cpu())
             del row_index
             member_aggregates.append(member_energy_abs / max(member_n, 1))
+            print(
+                f"[ENS-DEBUG] member={member_index} member_sum_shape="
+                f"{tuple(member_sum.shape)} batches_n={member_n}",
+                flush=True,
+            )
             prediction_sum = (
                 member_sum if prediction_sum is None else prediction_sum + member_sum
             )
+    print(
+        f"[ENS-DEBUG] prediction_sum_shape={tuple(prediction_sum.shape)} "
+        f"target_rows={len(target_store)}",
+        flush=True,
+    )
     mean_prediction = prediction_sum / float(len(checkpoint_paths))
     target_all = torch.cat(target_store, dim=0).to(mean_prediction.device)
 
