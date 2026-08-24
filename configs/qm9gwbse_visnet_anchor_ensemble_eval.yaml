@@ -38,9 +38,6 @@ loss:
   oscillator_weight: 0.0
   gap_weight: 0.0
   ordering_weight: 0.0
-transfer:
-  checkpoint_path: checkpoints/visnet_qm9gwbse_full_finetune.pt
-  mode: frozen_sidecar
 training:
   device: cuda
   seed: 17
