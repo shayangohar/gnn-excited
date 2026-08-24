@@ -536,8 +536,10 @@ def evaluate_ensemble(
     """Compute metrics on the AVERAGED predictions of N checkpoints.
 
     Members are loaded sequentially into the same model instance; loaders must
-    be deterministic (shuffle=False). Only energy columns participate in
-    aggregate/ordering metrics; within-spin adjacency rules apply.
+    be deterministic (shuffle=False). Per-molecule predictions are concatenated
+    within each member and averaged across members before metrics. Only energy
+    columns participate in aggregate/ordering metrics; within-spin adjacency
+    rules apply.
     """
     target_dim = len(target_columns)
     energy_positions = [
@@ -547,7 +549,7 @@ def evaluate_ensemble(
     spin_pairs = same_spin_adjacent_pairs(
         [target_columns[index] for index in energy_positions]
     )
-    prediction_sum = None
+    member_predictions = []
     target_store = []
     member_aggregates = []
     with torch.no_grad():
@@ -557,42 +559,26 @@ def evaluate_ensemble(
                 state = state['model_state_dict']
             model.load_state_dict(state)
             model.eval()
-            member_sum = None
-            member_energy_abs = 0.0
-            member_n = 0
-            row_index = 0
+            rows = []
+            energy_abs = 0.0
+            count = 0
             for batch in loader:
                 batch = batch.to(device)
                 target = batch.y.view(-1, target_dim)
                 prediction, _ = _forward_model(model, batch, target_dim)
                 prediction = prediction.detach().float()
-                member_sum = (
-                    prediction if member_sum is None else member_sum + prediction
-                )
-                member_energy_abs += float(
+                rows.append(prediction)
+                energy_abs += float(
                     (
                         prediction[:, energy_positions] - target[:, energy_positions]
                     ).abs().sum().item()
                 )
-                member_n += target.shape[0]
+                count += target.shape[0]
                 if member_index == 0:
                     target_store.append(target.detach().cpu())
-            del row_index
-            member_aggregates.append(member_energy_abs / max(member_n, 1))
-            print(
-                f"[ENS-DEBUG] member={member_index} member_sum_shape="
-                f"{tuple(member_sum.shape)} batches_n={member_n}",
-                flush=True,
-            )
-            prediction_sum = (
-                member_sum if prediction_sum is None else prediction_sum + member_sum
-            )
-    print(
-        f"[ENS-DEBUG] prediction_sum_shape={tuple(prediction_sum.shape)} "
-        f"target_rows={len(target_store)}",
-        flush=True,
-    )
-    mean_prediction = prediction_sum / float(len(checkpoint_paths))
+            member_aggregates.append(energy_abs / max(count, 1))
+            member_predictions.append(torch.cat(rows, dim=0))
+    mean_prediction = torch.stack(member_predictions, dim=0).mean(dim=0)
     target_all = torch.cat(target_store, dim=0).to(mean_prediction.device)
 
     metrics: dict[str, float] = {}
@@ -600,12 +586,9 @@ def evaluate_ensemble(
         metrics[f'{column}_mae'] = (
             (mean_prediction[:, index] - target_all[:, index]).abs().mean().item()
         )
-    energy_values = [target_all[:, index] for index in energy_positions]
     pred_energy = mean_prediction[:, energy_positions]
-    target_energy = torch.stack(energy_values, dim=1)
-    metrics['energy_eV_mae'] = (
-        (pred_energy - target_energy).abs().mean().item()
-    )
+    target_energy = target_all[:, energy_positions]
+    metrics['energy_eV_mae'] = (pred_energy - target_energy).abs().mean().item()
     prefixes = sorted({str(target_columns[i])[:1] for i in energy_positions})
     for prefix in prefixes:
         positions = [
@@ -613,9 +596,10 @@ def evaluate_ensemble(
         ]
         if len(positions) > 1:
             metrics[f'{prefix}manifold_eV_mae'] = (
-                (
-                    mean_prediction[:, positions] - target_all[:, positions]
-                ).abs().mean().item()
+                (mean_prediction[:, positions] - target_all[:, positions])
+                .abs()
+                .mean()
+                .item()
             )
     if len(energy_positions) > 1:
         pred_gaps = pred_energy[:, 1:] - pred_energy[:, :-1]
