@@ -61,8 +61,8 @@ wandb:
   - promoted
 evaluation:
   checkpoint_paths:
-  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s17.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_frozen.pt
   - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s18.pt
   - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s19.pt
   - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s20.pt
-  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_frozen.pt
+  - checkpoints/visnet_qm9gwbse_hamiltonian_anchor_s21.pt
