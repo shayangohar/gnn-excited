@@ -551,7 +551,7 @@ def evaluate_ensemble(
     target_store = []
     member_aggregates = []
     with torch.no_grad():
-        for path in checkpoint_paths:
+        for member_index, path in enumerate(checkpoint_paths):
             state = torch.load(path, map_location=device)
             if isinstance(state, dict) and 'model_state_dict' in state:
                 state = state['model_state_dict']
@@ -575,9 +575,8 @@ def evaluate_ensemble(
                     ).abs().sum().item()
                 )
                 member_n += target.shape[0]
-                if len(target_store) < total_rows_hint(loader):
+                if member_index == 0:
                     target_store.append(target.detach().cpu())
-                row_index += member_n
             del row_index
             member_aggregates.append(member_energy_abs / max(member_n, 1))
             prediction_sum = (
@@ -635,10 +634,6 @@ def evaluate_ensemble(
     for member_index, value in enumerate(member_aggregates):
         metrics[f'member_{member_index}_energy_eV_mae'] = value
     return metrics
-
-
-def total_rows_hint(loader):
-    return getattr(getattr(loader, 'dataset', None), '__len__', lambda: 0)()
 
 
 def evaluate(
