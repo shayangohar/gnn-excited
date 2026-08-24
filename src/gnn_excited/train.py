@@ -583,7 +583,6 @@ def evaluate_ensemble(
             prediction_sum = (
                 member_sum if prediction_sum is None else prediction_sum + member_sum
             )
-    del total_n
     mean_prediction = prediction_sum / float(len(checkpoint_paths))
     target_all = torch.cat(target_store, dim=0).to(mean_prediction.device)
 
