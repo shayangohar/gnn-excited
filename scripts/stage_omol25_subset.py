@@ -19,7 +19,7 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
 
-REPO = "facebook/omol25"
+REPO = "facebook/OMol25"
 DEFAULT_DEST = Path("/work/hdd/bhzu/gnn-excited/data/omol25")
 
 
