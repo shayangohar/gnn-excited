@@ -48,6 +48,14 @@ training:
   checkpoint_path: checkpoints/anchor_ensemble_eval.pt
   metrics_csv_path: runs/anchor_ensemble_eval.metrics.csv
   summary_json_path: runs/anchor_ensemble_eval.summary.json
+  batch_size: 16
+  dataloader:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: false
+    prefetch_factor: 4
+  learning_rate: 0.0003
+  weight_decay: 0.001
 wandb:
   enabled: true
   entity: shayangohar2007-fresno-state
