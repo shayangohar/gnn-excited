@@ -6,7 +6,6 @@ model:
   cutoff: 6.0
   max_num_neighbors: 100
   reduce_op: mean
-  num_features: 100
 
 dataset:
   type: omol25
