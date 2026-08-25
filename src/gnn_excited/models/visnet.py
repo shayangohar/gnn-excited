@@ -95,6 +95,9 @@ if nn is not None:
             if batch is None:
                 batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
             scalar, vector = self.encoder(z, pos, batch)
+            if not self.energy_indices or not self.oscillator_indices:
+                head = self.energy_head if self.energy_indices else self.oscillator_head
+                return scatter(head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
             energy = scatter(
                 self.energy_head(scalar, vector), batch, dim=0, reduce=self.reduce_op
             )
