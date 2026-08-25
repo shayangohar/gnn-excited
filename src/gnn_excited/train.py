@@ -1064,6 +1064,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                         error_if_nonfinite=True,
                     )
                 except RuntimeError as exc:
+                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
                     keys = getattr(batch, 'molecule_key', None)
                     raise FloatingPointError(f'Non-finite training gradient norm; molecule_keys={keys}') from exc
                 optimizer.step()

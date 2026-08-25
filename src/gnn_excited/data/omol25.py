@@ -21,6 +21,7 @@ else:
     _IMPORT_ERROR = None
 
 DEFAULT_TARGET_COLUMNS = ('gap',)
+GAP_SCALE_EV = 10.0
 
 
 class Omol25GapDataset(Dataset):
@@ -100,7 +101,7 @@ class Omol25GapDataset(Dataset):
             raise ValueError(
                 f"Molecule {row['molecule_key']} numbers/positions mismatch: {z.shape[0]} vs {pos.shape[0]}"
             )
-        y_values = [float(row[column]) for column in self.target_columns]
+        y_values = [float(row[column]) / GAP_SCALE_EV for column in self.target_columns]
         y = torch.tensor([y_values], dtype=torch.float32)
         return Data(
             z=torch.as_tensor(z, dtype=torch.long),
