@@ -1035,14 +1035,21 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             for batch in train_loader:
                 batch = batch.to(device)
                 target = batch.y.view(-1, len(target_columns))
-                _require_finite(target, 'training targets', batch)
-                pred, predicted_dipoles = _forward_model(model, batch, len(target_columns))
-                target_dipoles = (
-                    batch.transition_dipole.view_as(predicted_dipoles)
-                    if predicted_dipoles is not None
-                    else None
-                )
-                _require_finite(pred, 'training predictions', batch)
+                pred, predicted_dipoles = None, None
+                try:
+                    _require_finite(target, 'training targets', batch)
+                    pred, predicted_dipoles = _forward_model(model, batch, len(target_columns))
+                    target_dipoles = (
+                        batch.transition_dipole.view_as(predicted_dipoles)
+                        if predicted_dipoles is not None
+                        else None
+                    )
+                    _require_finite(pred, 'training predictions', batch)
+                except FloatingPointError:
+                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                        optimizer.zero_grad(set_to_none=True)
+                        continue
+                    raise
                 if predicted_dipoles is not None:
                     _require_finite(predicted_dipoles, 'training transition dipoles', batch)
                 loss = _training_loss(
