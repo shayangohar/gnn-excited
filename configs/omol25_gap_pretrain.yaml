@@ -1,9 +1,9 @@
 model:
   type: visnet
   hidden_channels: 216
-  num_layers: 5
-  num_rbf: 32
-  cutoff: 6.0
+  num_layers: 3
+  num_rbf: 25
+  cutoff: 5.0
   max_num_neighbors: 100
   reduce_op: mean
 
