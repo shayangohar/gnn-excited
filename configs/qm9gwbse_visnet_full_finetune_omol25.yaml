@@ -38,7 +38,7 @@ loss:
 
 transfer:
   checkpoint_path: checkpoints/omol25_gap_pretrain.pt
-  mode: full_finetune
+  mode: encoder_finetune
 
 training:
   device: cuda
