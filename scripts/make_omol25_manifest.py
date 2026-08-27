@@ -14,9 +14,9 @@ def main() -> None:
     with open(args.input, newline="", encoding="utf-8") as src, open(args.output, "w", newline="", encoding="utf-8") as dst:
         reader = csv.DictReader(src)
         writer = csv.writer(dst)
-        writer.writerow(["molecule_key", "status", "natoms", "gap_eV"])
+        writer.writerow(["molecule_key", "status", "natoms", "gap_eV", "homo_eV"])
         for row in reader:
-            writer.writerow([row["id"], "ok", row["natoms"], row["gap"]])
+            writer.writerow([row["id"], "ok", row["natoms"], row["gap"], row["homo"]])
             written += 1
     print(f"wrote {written} rows to {args.output}")
 
