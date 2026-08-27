@@ -60,6 +60,7 @@ if nn is not None:
             self,
             target_columns: Sequence[str],
             hidden_channels: int = 128,
+            denoising: bool = False,
             **kwargs: Any,
         ):
             super().__init__()
@@ -68,6 +69,7 @@ if nn is not None:
                 self.target_columns
             )
             self.hidden_channels = int(hidden_channels)
+            self.denoising = bool(denoising)
             encoder_kwargs = dict(kwargs)
             encoder_kwargs.pop("output_channels", None)
             encoder_kwargs.pop("out_channels", None)
@@ -82,6 +84,8 @@ if nn is not None:
             self.oscillator_head = MultiTargetEquivariantScalar(
                 self.hidden_channels, len(self.oscillator_indices)
             )
+            if self.denoising:
+                self.denoise_head = nn.Linear(self.hidden_channels, 1)
 
         @property
         def energy_readout(self):
@@ -111,6 +115,13 @@ if nn is not None:
             output[:, list(self.energy_indices)] = energy
             output[:, list(self.oscillator_indices)] = oscillator
             return output
+
+        def forward_denoise(self, z, pos, batch=None):
+            if batch is None:
+                batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
+            scalar, vector = self.encoder(z, pos, batch)
+            # vector is [num_nodes, 3, hidden_channels]; predict per-atom 3-vector displacement
+            return self.denoise_head(vector).squeeze(-1)  # [num_nodes, 3]
 
         def freeze_encoder(self) -> None:
             for parameter in self.encoder.parameters():

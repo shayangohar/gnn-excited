@@ -765,6 +765,36 @@ def evaluate(
                 metrics[f'{name}_p99'] = float(np.quantile(values, 0.99))
     return metrics
 
+def evaluate_denoising(
+    model,
+    loader,
+    device: str,
+    config: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """Denoising-pretraining validation: per-atom displacement MSE against fresh noise."""
+    model.eval()
+    totals: dict[str, float] = {'loss': 0.0, 'n': 0}
+    train_cfg = (config or {}).get('training') or {}
+    sigma_min = float(train_cfg.get('denoise_sigma', 0.1))
+    sigma_max = float(train_cfg.get('denoise_sigma_max', 0.6))
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            sigma = sigma_min + (sigma_max - sigma_min) * torch.rand(
+                1, device=batch.pos.device
+            )
+            noise = torch.randn_like(batch.pos) * sigma
+            denoised_pos = batch.pos + noise
+            disp = model.forward_denoise(batch.z, denoised_pos, batch.batch)
+            loss = weighted_mse_loss(disp, -noise)
+            _require_finite(loss, 'validation denoise loss', batch)
+            n = batch.pos.size(0)
+            totals['loss'] += loss.item() * n
+            totals['n'] += n
+    n = max(totals.pop('n'), 1)
+    return {key: value / n for key, value in totals.items()}
+
+
 def build_scheduler(optimizer, scheduler_cfg: dict[str, Any] | None, total_epochs: int | None = None):
     if not scheduler_cfg:
         return None
@@ -920,6 +950,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     test_loader = _make_loader(test_ds, train_cfg, device, shuffle=False, seed=training_seed + 2)
 
     model_builder = build_visnet if model_type in {'visnet', 'visnet_one_pass'} else build_dimenetpp
+    model_kwargs['denoising'] = bool(train_cfg.get('denoising', False))
     model = model_builder(**model_kwargs).to(device)
     evaluation_cfg = config.get('evaluation') or {}
     evaluation_checkpoint = evaluation_cfg.get('checkpoint_path')
@@ -971,6 +1002,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     early_stopping_patience = train_cfg.get('early_stopping_patience')
     early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
     max_grad_norm = float(train_cfg.get('max_grad_norm', 0.0))
+    denoising = bool(train_cfg.get('denoising', False))
+    denoise_sigma = float(train_cfg.get('denoise_sigma', 0.1))
+    denoise_sigma_max = float(train_cfg.get('denoise_sigma_max', 0.6))
     epochs_without_improvement = 0
     stopped_early = False
     stop_reason = None
@@ -1034,34 +1068,50 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             total_unweighted_loss = 0.0
             for batch in train_loader:
                 batch = batch.to(device)
-                target = batch.y.view(-1, len(target_columns))
                 pred, predicted_dipoles = None, None
-                try:
-                    _require_finite(target, 'training targets', batch)
-                    pred, predicted_dipoles = _forward_model(model, batch, len(target_columns))
-                    target_dipoles = (
-                        batch.transition_dipole.view_as(predicted_dipoles)
-                        if predicted_dipoles is not None
-                        else None
+                if denoising:
+                    sigma = denoise_sigma + (denoise_sigma_max - denoise_sigma) * torch.rand(
+                        1, device=batch.pos.device
                     )
-                    _require_finite(pred, 'training predictions', batch)
-                except FloatingPointError:
-                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
-                        optimizer.zero_grad(set_to_none=True)
-                        continue
-                    raise
-                if predicted_dipoles is not None:
-                    _require_finite(predicted_dipoles, 'training transition dipoles', batch)
-                loss = _training_loss(
-                    pred,
-                    target,
-                    target_columns,
-                    config,
-                    loss_weights_tensor,
-                    normalize_loss_weights,
-                    predicted_dipoles,
-                    target_dipoles,
-                )
+                    noise = torch.randn_like(batch.pos) * sigma
+                    denoised_pos = batch.pos + noise
+                    try:
+                        disp = model.forward_denoise(batch.z, denoised_pos, batch.batch)
+                        _require_finite(disp, 'training denoise predictions', batch)
+                    except FloatingPointError:
+                        if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
+                        raise
+                    loss = weighted_mse_loss(disp, -noise)
+                else:
+                    target = batch.y.view(-1, len(target_columns))
+                    try:
+                        _require_finite(target, 'training targets', batch)
+                        pred, predicted_dipoles = _forward_model(model, batch, len(target_columns))
+                        target_dipoles = (
+                            batch.transition_dipole.view_as(predicted_dipoles)
+                            if predicted_dipoles is not None
+                            else None
+                        )
+                        _require_finite(pred, 'training predictions', batch)
+                    except FloatingPointError:
+                        if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                            optimizer.zero_grad(set_to_none=True)
+                            continue
+                        raise
+                    if predicted_dipoles is not None:
+                        _require_finite(predicted_dipoles, 'training transition dipoles', batch)
+                    loss = _training_loss(
+                        pred,
+                        target,
+                        target_columns,
+                        config,
+                        loss_weights_tensor,
+                        normalize_loss_weights,
+                        predicted_dipoles,
+                        target_dipoles,
+                    )
                 _require_finite(loss, 'training loss', batch)
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -1077,15 +1127,18 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                     keys = getattr(batch, 'molecule_key', None)
                     raise FloatingPointError(f'Non-finite training gradient norm; molecule_keys={keys}') from exc
                 optimizer.step()
-                batch_n = target.shape[0]
+                batch_n = batch.pos.size(0) if denoising else target.shape[0]
                 total_loss += loss.item() * batch_n
                 total_n += batch_n
-                if loss_weights_tensor is not None:
+                if not denoising and loss_weights_tensor is not None:
                     total_unweighted_loss += weighted_mse_loss(pred.detach(), target).item() * batch_n
             train_seconds = time.perf_counter() - train_started
 
             val_started = time.perf_counter()
-            val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(val_ds) else {'loss': float('nan')}
+            if denoising:
+                val_metrics = evaluate_denoising(model, val_loader, device, config) if len(val_ds) else {'loss': float('nan')}
+            else:
+                val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(val_ds) else {'loss': float('nan')}
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
