@@ -675,14 +675,14 @@ def evaluate(
             try:
                 _require_finite(pred, 'validation predictions', batch)
             except FloatingPointError:
-                if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                     continue
                 raise
             if predicted_dipoles is not None:
                 try:
                     _require_finite(predicted_dipoles, 'validation transition dipoles', batch)
                 except FloatingPointError:
-                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                    if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                         continue
                     raise
             if oscillator_indices:
@@ -709,7 +709,7 @@ def evaluate(
             try:
                 _require_finite(loss, 'validation loss', batch)
             except FloatingPointError:
-                if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                     continue
                 raise
             metrics = batch_mae(
@@ -1094,7 +1094,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                         disp = model.forward_denoise(batch.z, denoised_pos, batch.batch)
                         _require_finite(disp, 'training denoise predictions', batch)
                     except FloatingPointError:
-                        if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                        if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                             optimizer.zero_grad(set_to_none=True)
                             continue
                         raise
@@ -1111,7 +1111,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                         )
                         _require_finite(pred, 'training predictions', batch)
                     except FloatingPointError:
-                        if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                        if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                             optimizer.zero_grad(set_to_none=True)
                             continue
                         raise
@@ -1136,7 +1136,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                         error_if_nonfinite=True,
                     )
                 except RuntimeError as exc:
-                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                    if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
                         optimizer.zero_grad(set_to_none=True)
                         continue
                     keys = getattr(batch, 'molecule_key', None)
