@@ -127,45 +127,49 @@ def test_state_target_layout_rejects_unpaired_state() -> None:
 def test_denoise_head_predicts_per_atom_displacement_when_pyg_available() -> None:
     pytest.importorskip('torch_geometric')
     torch = pytest.importorskip('torch')
-    from gnn_excited.models.visnet import build_visnet
-    from gnn_excited.train import evaluate_denoising
+    rng_state = torch.get_rng_state()
+    try:
+        from gnn_excited.models.visnet import build_visnet
+        from gnn_excited.train import evaluate_denoising
 
-    model = build_visnet(
-        target_columns=('S1_eV', 'log1p_S1_f'),
-        hidden_channels=32,
-        num_layers=1,
-        num_rbf=8,
-        cutoff=3.0,
-        max_num_neighbors=8,
-        denoising=True,
-    )
-    assert hasattr(model, 'denoise_head')
-    z = torch.tensor([6, 1, 1], dtype=torch.long)
-    pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
-    batch = torch.zeros(3, dtype=torch.long)
-    noise = torch.randn_like(pos)
-    disp = model.forward_denoise(z, pos + noise, batch)
-    assert disp.shape == (3, 3)
-    loss = torch.nn.functional.mse_loss(disp, -noise)
-    loss.backward()
-    assert model.denoise_head.weight.grad is not None
+        model = build_visnet(
+            target_columns=('S1_eV', 'log1p_S1_f'),
+            hidden_channels=32,
+            num_layers=1,
+            num_rbf=8,
+            cutoff=3.0,
+            max_num_neighbors=8,
+            denoising=True,
+        )
+        assert hasattr(model, 'denoise_head')
+        z = torch.tensor([6, 1, 1], dtype=torch.long)
+        pos = torch.tensor([[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [-0.8, 0.0, 0.0]])
+        batch = torch.zeros(3, dtype=torch.long)
+        noise = torch.randn_like(pos)
+        disp = model.forward_denoise(z, pos + noise, batch)
+        assert disp.shape == (3, 3)
+        loss = torch.nn.functional.mse_loss(disp, -noise)
+        loss.backward()
+        assert model.denoise_head.weight.grad is not None
 
-    class Batch:
-        def __init__(self):
-            self.z = z
-            self.pos = pos
-            self.batch = batch
+        class Batch:
+            def __init__(self):
+                self.z = z
+                self.pos = pos
+                self.batch = batch
 
-        def to(self, _device):
-            return self
+            def to(self, _device):
+                return self
 
-    metrics = evaluate_denoising(
-        model,
-        [Batch()],
-        'cpu',
-        {'training': {'denoise_sigma': 0.1, 'denoise_sigma_max': 0.6}},
-    )
-    assert metrics['loss'] >= 0.0
+        metrics = evaluate_denoising(
+            model,
+            [Batch()],
+            'cpu',
+            {'training': {'denoise_sigma': 0.1, 'denoise_sigma_max': 0.6}},
+        )
+        assert metrics['loss'] >= 0.0
+    finally:
+        torch.set_rng_state(rng_state)
 
 
 def test_state_conditioned_model_injects_each_state_throughout_when_pyg_available() -> None:
