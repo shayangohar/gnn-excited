@@ -28,7 +28,9 @@ def main() -> None:
             data = getattr(row, "_data", None) or {}
             for key in ("data_id", "composition", "charge", "reference_source", "source", "spin"):
                 samples.setdefault(key, Counter())[str(data.get(key))[:40]] += 1
-            ident = str(data.get("composition")) + "|" + str(data.get("charge"))
+            src = str(data.get("source"))
+            base = src.rsplit("_confo", 1)[0] if "_confo" in src else src.split("/")[-1]
+            ident = base or str(data.get("composition"))
             identity[ident] += 1
             total += 1
             if total >= args.max_rows:
