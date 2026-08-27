@@ -672,9 +672,19 @@ def evaluate(
                 if predicted_dipoles is not None
                 else None
             )
-            _require_finite(pred, 'validation predictions', batch)
+            try:
+                _require_finite(pred, 'validation predictions', batch)
+            except FloatingPointError:
+                if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                    continue
+                raise
             if predicted_dipoles is not None:
-                _require_finite(predicted_dipoles, 'validation transition dipoles', batch)
+                try:
+                    _require_finite(predicted_dipoles, 'validation transition dipoles', batch)
+                except FloatingPointError:
+                    if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                        continue
+                    raise
             if oscillator_indices:
                 oscillator_pred = pred[:, oscillator_indices].double()
                 oscillator_inverse_overflow_count += int(
@@ -696,7 +706,12 @@ def evaluate(
                 predicted_dipoles,
                 target_dipoles,
             )
-            _require_finite(loss, 'validation loss', batch)
+            try:
+                _require_finite(loss, 'validation loss', batch)
+            except FloatingPointError:
+                if bool(train_cfg.get('skip_nonfinite_batches', False)):
+                    continue
+                raise
             metrics = batch_mae(
                 pred,
                 target,
