@@ -58,9 +58,9 @@ training:
     warmup_epochs: 1
     start_factor: 0.0033333333333333335
     min_lr: 0.00001
-  checkpoint_path: checkpoints/visnet_qm9gwbse_full_finetune.pt
-  metrics_csv_path: runs/visnet_qm9gwbse_full_finetune.metrics.csv
-  summary_json_path: runs/visnet_qm9gwbse_full_finetune.summary.json
+  checkpoint_path: checkpoints/omol25_enc_lowlr_qm9gwbse_full_finetune.pt
+  metrics_csv_path: runs/omol25_enc_lowlr_qm9gwbse_full_finetune.metrics.csv
+  summary_json_path: runs/omol25_enc_lowlr_qm9gwbse_full_finetune.summary.json
 
 wandb:
   enabled: true
