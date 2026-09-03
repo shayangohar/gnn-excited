@@ -21,6 +21,8 @@ else:
     _IMPORT_ERROR = None
 
 DEFAULT_TARGET_COLUMNS = ('gap',)
+# Training-time divisor only: reported MAEs are converted back to true eV via
+# target_scale in train.py. Raw `*_mae` values on these targets are off by 10x.
 GAP_SCALE_EV = 10.0
 
 

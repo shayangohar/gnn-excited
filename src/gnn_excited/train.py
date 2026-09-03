@@ -29,7 +29,7 @@ else:
 
 from gnn_excited.data.pyg_dataset import QCDGES1Dataset, deterministic_split, explicit_split
 from gnn_excited.data.qm9gwbse import QM9GWBSEDataset, electronic_descriptor_keys
-from gnn_excited.data.omol25 import Omol25GapDataset
+from gnn_excited.data.omol25 import GAP_SCALE_EV, Omol25GapDataset
 from gnn_excited.models.dimenetpp import build_dimenetpp
 from gnn_excited.models.visnet import build_visnet, load_transfer_checkpoint
 from gnn_excited.losses import (
@@ -472,16 +472,26 @@ def batch_mae(
     target,
     target_columns: tuple[str, ...],
     include_physical_oscillator_metrics: bool = True,
+    target_scale: float = 1.0,
 ) -> dict[str, float]:
+    """Report MAEs, unscaling energy/gap metrics back to physical units.
+
+    Some datasets train on scaled targets (e.g. OMol25 gaps divided by
+    GAP_SCALE_EV); pass that divisor as ``target_scale`` so energy and
+    adjacent-gap MAEs come out in true eV. Oscillator metrics are
+    dimensionless/log-space and are never scaled; counts are unaffected.
+    """
+    scale = float(target_scale)
     metrics: dict[str, float] = {}
     energy_maes: list[float] = []
     log_osc_maes: list[float] = []
     osc_maes: list[float] = []
     for idx, column in enumerate(target_columns):
         mae = (pred[:, idx] - target[:, idx]).abs().mean().item()
-        metrics[f'{column}_mae'] = mae
         if column.endswith('_eV'):
+            mae = mae * scale
             energy_maes.append(mae)
+        metrics[f'{column}_mae'] = mae
         physical_osc_column = _physical_oscillator_column(column)
         if physical_osc_column is not None:
             log_osc_maes.append(mae)
@@ -504,7 +514,7 @@ def batch_mae(
         target_energy = target[:, energy_indices]
         pred_gaps = pred_energy[:, 1:] - pred_energy[:, :-1]
         target_gaps = target_energy[:, 1:] - target_energy[:, :-1]
-        gap_errors = (pred_gaps - target_gaps).abs()
+        gap_errors = (pred_gaps - target_gaps).abs() * scale
         metrics['adjacent_gap_eV_mae'] = gap_errors.mean().item()
         spin_pairs = same_spin_adjacent_pairs(
             [target_columns[index] for index in energy_indices]
@@ -533,6 +543,7 @@ def evaluate_ensemble(
     device: str,
     target_columns,
     config=None,
+    target_scale: float = 1.0,
 ):
     """Compute metrics on the AVERAGED predictions of N checkpoints.
 
@@ -540,8 +551,11 @@ def evaluate_ensemble(
     be deterministic (shuffle=False). Per-molecule predictions are concatenated
     within each member and averaged across members before metrics. Only energy
     columns participate in aggregate/ordering metrics; within-spin adjacency
-    rules apply.
+    rules apply. ``target_scale`` converts scaled training targets (e.g.
+    OMol25 gaps divided by GAP_SCALE_EV) back to physical units for energy
+    and gap MAE reporting; training itself is unaffected.
     """
+    scale = float(target_scale)
     target_dim = len(target_columns)
     energy_positions = [
         index for index, column in enumerate(target_columns)
@@ -578,7 +592,7 @@ def evaluate_ensemble(
                 if member_index == 0:
                     target_store.append(target.detach().cpu())
             member_aggregates.append(
-                energy_abs / max(count * max(len(energy_positions), 1), 1)
+                scale * energy_abs / max(count * max(len(energy_positions), 1), 1)
             )
             member_predictions.append(torch.cat(rows, dim=0))
     mean_prediction = torch.stack(member_predictions, dim=0).mean(dim=0)
@@ -586,12 +600,15 @@ def evaluate_ensemble(
 
     metrics: dict[str, float] = {}
     for index, column in enumerate(target_columns):
-        metrics[f'{column}_mae'] = (
+        column_mae = (
             (mean_prediction[:, index] - target_all[:, index]).abs().mean().item()
         )
+        if str(column).endswith('_eV'):
+            column_mae *= scale
+        metrics[f'{column}_mae'] = column_mae
     pred_energy = mean_prediction[:, energy_positions]
     target_energy = target_all[:, energy_positions]
-    metrics['energy_eV_mae'] = (pred_energy - target_energy).abs().mean().item()
+    metrics['energy_eV_mae'] = scale * (pred_energy - target_energy).abs().mean().item()
     prefixes = sorted({str(target_columns[i])[:1] for i in energy_positions})
     for prefix in prefixes:
         positions = [
@@ -599,7 +616,8 @@ def evaluate_ensemble(
         ]
         if len(positions) > 1:
             metrics[f'{prefix}manifold_eV_mae'] = (
-                (mean_prediction[:, positions] - target_all[:, positions])
+                scale
+                * (mean_prediction[:, positions] - target_all[:, positions])
                 .abs()
                 .mean()
                 .item()
@@ -607,7 +625,7 @@ def evaluate_ensemble(
     if len(energy_positions) > 1:
         pred_gaps = pred_energy[:, 1:] - pred_energy[:, :-1]
         target_gaps = target_energy[:, 1:] - target_energy[:, :-1]
-        gap_errors = (pred_gaps - target_gaps).abs()
+        gap_errors = (pred_gaps - target_gaps).abs() * scale
         metrics['adjacent_gap_eV_mae'] = gap_errors.mean().item()
         for gap_index, (left, right) in enumerate(
             zip(energy_positions[:-1], energy_positions[1:])
@@ -642,8 +660,10 @@ def evaluate(
     normalize_loss_weights: bool = True,
     config: dict[str, Any] | None = None,
     predictions_csv_path: str | Path | None = None,
+    target_scale: float = 1.0,
 ) -> dict[str, float]:
     model.eval()
+    scale = float(target_scale)
     totals: dict[str, float] = {'loss': 0.0, 'n': 0}
     count_metrics = {'ordering_violation_count', 'ordering_comparison_count'}
     target_dim = len(target_columns)
@@ -717,6 +737,7 @@ def evaluate(
                 target,
                 target_columns,
                 include_physical_oscillator_metrics,
+                target_scale=scale,
             )
             if predicted_dipoles is not None:
                 dipole_squared_error = phase_invariant_vector_squared_error(
@@ -747,6 +768,9 @@ def evaluate(
                     for target_index, column in enumerate(target_columns):
                         prediction = float(pred_cpu[sample_index, target_index])
                         expected = float(target_cpu[sample_index, target_index])
+                        if column.endswith('_eV'):
+                            prediction *= scale
+                            expected *= scale
                         error = abs(prediction - expected)
                         row[f'target_{column}'] = expected
                         row[f'prediction_{column}'] = prediction
@@ -933,6 +957,9 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
         }
     test_subset_key_groups = _subset_key_groups(rows, test_idx)
     dataset_type = str(dataset_cfg.get('type', 'qcdge')).lower()
+    # OMol25 targets are stored divided by GAP_SCALE_EV for training stability;
+    # report all energy/gap MAEs back in true eV (other datasets: scale 1.0).
+    target_scale = float(GAP_SCALE_EV) if dataset_type == 'omol25' else 1.0
     if dataset_type == 'omol25':
         dataset_class = Omol25GapDataset
     elif dataset_type in {'qm9gwbse', 'qm9-gwbse'}:
@@ -1153,7 +1180,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             if denoising:
                 val_metrics = evaluate_denoising(model, val_loader, device, config) if len(val_ds) else {'loss': float('nan')}
             else:
-                val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config) if len(val_ds) else {'loss': float('nan')}
+                val_metrics = evaluate(model, val_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config, target_scale=target_scale) if len(val_ds) else {'loss': float('nan')}
             val_seconds = time.perf_counter() - val_started
             epoch_seconds = time.perf_counter() - epoch_started
             val_loss = val_metrics.get('loss', math.inf)
@@ -1241,6 +1268,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 device,
                 target_columns,
                 config,
+                target_scale=target_scale,
             )
         else:
             test_metrics = evaluate(
@@ -1252,6 +1280,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             normalize_loss_weights,
             config,
             predictions_csv_path=predictions_csv_path,
+            target_scale=target_scale,
         ) if len(test_ds) else {}
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
@@ -1264,7 +1293,7 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                     shuffle=False,
                     seed=training_seed + 100 + subset_index,
                 )
-                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config)
+                per_subset_test_metrics[subset_name] = evaluate(model, subset_loader, device, target_columns, loss_weights_tensor, normalize_loss_weights, config, target_scale=target_scale)
         wandb_run.log_test_metrics(test_metrics, best_epoch)
         if wandb_run.enabled and per_subset_test_metrics:
             flat_subset_metrics = {

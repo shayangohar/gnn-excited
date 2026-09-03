@@ -172,6 +172,106 @@ def test_batch_mae_reports_multistate_metrics() -> None:
     assert metrics['ordering_comparison_count'] == 1
 
 
+def test_batch_mae_unscales_energy_and_gap_metrics_with_target_scale() -> None:
+    torch = pytest.importorskip('torch')
+    from gnn_excited.train import batch_mae
+
+    pred = torch.tensor([[0.5, 0.0, 0.7, 0.0]])
+    target = torch.tensor([[0.4, 0.0, 0.9, 0.0]])
+    metrics = batch_mae(
+        pred, target, ('gap_eV', 'log1p_S1_f', 'homo_eV', 'log1p_S2_f'), target_scale=10.0
+    )
+
+    # Raw energy errors are 0.1 and 0.2 in scaled units; reported in true eV.
+    assert metrics['gap_eV_mae'] == pytest.approx(1.0)
+    assert metrics['homo_eV_mae'] == pytest.approx(2.0)
+    assert metrics['energy_eV_mae'] == pytest.approx(1.5)
+    # Raw adjacent-gap error |0.2 - 0.5| = 0.3 scaled -> 3.0 eV.
+    assert metrics['gap_homo_gap_eV_mae'] == pytest.approx(3.0)
+    assert metrics['adjacent_gap_eV_mae'] == pytest.approx(3.0)
+    # Oscillator (dimensionless/log-space) metrics are never scaled.
+    assert metrics['log1p_S1_f_mae'] == pytest.approx(0.0)
+    assert metrics['oscillator_strength_mae'] == pytest.approx(0.0)
+    # No spin-prefixed columns -> ordering rules do not apply.
+    assert metrics['ordering_comparison_count'] == 0
+
+
+def test_evaluate_reports_unscaled_energy_csv_and_quantiles(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+
+    class Batch(SimpleNamespace):
+        def to(self, _device):
+            return self
+
+    class FixedModel(torch.nn.Module):
+        def forward(self, _z, _pos, _batch):
+            return torch.tensor([[0.5]])
+
+    output = tmp_path / "predictions.csv"
+    batch = Batch(
+        z=torch.tensor([1]),
+        pos=torch.zeros((1, 3)),
+        batch=torch.zeros(1, dtype=torch.long),
+        y=torch.tensor([[0.4]]),
+        molecule_key=["mol-1"],
+    )
+
+    metrics = evaluate(
+        FixedModel(),
+        [batch],
+        "cpu",
+        ("gap_eV",),
+        predictions_csv_path=output,
+        target_scale=10.0,
+    )
+
+    assert metrics["gap_eV_mae"] == pytest.approx(1.0)
+    assert metrics["energy_eV_mae"] == pytest.approx(1.0)
+    assert metrics["energy_eV_abs_error_max"] == pytest.approx(1.0)
+    rows = output.read_text(encoding="utf-8").splitlines()
+    assert rows[1].startswith("mol-1,")
+    _, csv_target, csv_pred, csv_err = rows[1].split(",")
+    assert float(csv_target) == pytest.approx(4.0)
+    assert float(csv_pred) == pytest.approx(5.0)
+    assert float(csv_err) == pytest.approx(1.0)
+
+
+def test_evaluate_ensemble_reports_unscaled_member_metrics(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    from gnn_excited.train import evaluate_ensemble
+
+    class Batch(SimpleNamespace):
+        def to(self, _device):
+            return self
+
+    class FixedModel(torch.nn.Module):
+        def forward(self, _z, _pos, _batch):
+            return torch.tensor([[0.5]])
+
+    checkpoint = tmp_path / "member.pt"
+    torch.save(FixedModel().state_dict(), checkpoint)
+    batch = Batch(
+        z=torch.tensor([1]),
+        pos=torch.zeros((1, 3)),
+        batch=torch.zeros(1, dtype=torch.long),
+        y=torch.tensor([[0.4]]),
+        molecule_key=["mol-1"],
+    )
+
+    metrics = evaluate_ensemble(
+        FixedModel(),
+        [checkpoint],
+        [batch],
+        "cpu",
+        ("gap_eV",),
+        target_scale=10.0,
+    )
+
+    assert metrics["gap_eV_mae"] == pytest.approx(1.0)
+    assert metrics["energy_eV_mae"] == pytest.approx(1.0)
+    assert metrics["member_0_energy_eV_mae"] == pytest.approx(1.0)
+
+
 def test_build_loss_weights_supports_energy_oscillator_defaults() -> None:
     config = {
         'loss': {
