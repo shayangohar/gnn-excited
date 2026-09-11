@@ -159,6 +159,103 @@ def _normalize_loss_weights(config: dict[str, Any]) -> bool:
     return bool(loss_cfg.get('normalize', True))
 
 
+def _encoder_backbone_units(model: Any) -> tuple[list, list, list]:
+    """Split a ViSNet model into (embedding_units, block_units, norm_units).
+
+    Each unit is a (dotted_name, module) pair ordered bottom-up. Returns
+    empty lists when the model has no ViSNet encoder (non-visnet models).
+    """
+    encoder = getattr(model, 'encoder', None)
+    blocks = getattr(encoder, 'vis_mp_layers', None)
+    if encoder is None or blocks is None:
+        return [], [], []
+    embeddings: list = []
+    norms: list = []
+    for name, module in encoder.named_children():
+        if name == 'vis_mp_layers':
+            continue
+        if name in {'out_norm', 'vec_out_norm'}:
+            norms.append((f'encoder.{name}', module))
+        else:
+            embeddings.append((f'encoder.{name}', module))
+    block_units = [(f'encoder.vis_mp_layers.{i}', blocks[i]) for i in range(len(blocks))]
+    return embeddings, block_units, norms
+
+
+def _apply_finetune_protocol(
+    model: Any, model_type: str, train_cfg: dict[str, Any]
+) -> list[dict[str, Any]] | None:
+    """Freeze bottom encoder blocks and build discriminative-LR param groups.
+
+    Config knobs (all under `training`, all default to current behavior):
+      freeze_bottom_blocks: freeze embedding children + first K vis_mp_layers blocks.
+      backbone_lr_scale: LR multiplier for all encoder params.
+      layerwise_lr_decay: geometric decay across unfrozen backbone units, top unit
+        (norms) highest; 0 disables per-unit decay (single backbone group).
+    Returns None when no protocol knob is set (caller keeps single-group AdamW).
+    """
+    freeze_bottom = int(train_cfg.get('freeze_bottom_blocks', 0) or 0)
+    backbone_scale = float(train_cfg.get('backbone_lr_scale', 1.0))
+    layer_decay = float(train_cfg.get('layerwise_lr_decay', 0.0) or 0.0)
+    if model_type not in {'visnet', 'visnet_one_pass'}:
+        return None
+    if freeze_bottom <= 0 and backbone_scale == 1.0 and layer_decay <= 0.0:
+        return None
+    embeddings, blocks, norms = _encoder_backbone_units(model)
+    if not embeddings and not blocks:
+        return None
+    base_lr = float(train_cfg['learning_rate'])
+    wd = float(train_cfg.get('weight_decay', 0.0))
+    if freeze_bottom > 0:
+        for _, module in embeddings:
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+        for _, module in blocks[:freeze_bottom]:
+            for parameter in module.parameters():
+                parameter.requires_grad_(False)
+
+    def live(module: Any) -> list:
+        return [p for p in module.parameters() if p.requires_grad]
+
+    groups: list[dict[str, Any]] = []
+    head_params = [
+        p
+        for name, module in model.named_children()
+        if 'head' in name
+        for p in live(module)
+    ]
+    if head_params:
+        groups.append({'params': head_params, 'lr': base_lr, 'weight_decay': wd})
+    backbone_units: list = (
+        [('embeddings', [m for _, m in embeddings])]
+        + [(f'block{i}', [m]) for i, (_, m) in enumerate(blocks)]
+        + [('norms', [m for _, m in norms])]
+    )
+    live_units = [
+        (uname, [p for m in mods for p in live(m)])
+        for uname, mods in backbone_units
+        if any(p.requires_grad for m in mods for p in m.parameters())
+    ]
+    if layer_decay > 0.0 and live_units:
+        top = len(live_units) - 1
+        for j, (_, params) in enumerate(live_units):
+            if params:
+                groups.append({
+                    'params': params,
+                    'lr': base_lr * backbone_scale * (layer_decay ** (top - j)),
+                    'weight_decay': wd,
+                })
+    else:
+        backbone_params = [p for _, params in live_units for p in params]
+        if backbone_params:
+            groups.append({
+                'params': backbone_params,
+                'lr': base_lr * backbone_scale,
+                'weight_decay': wd,
+            })
+    return groups or None
+
+
 def _training_loss(
     pred,
     target,
@@ -1027,11 +1124,19 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     optimizer = None
     scheduler = None
     if not evaluation_mode:
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=float(train_cfg['learning_rate']),
-            weight_decay=float(train_cfg.get('weight_decay', 0.0)),
-        )
+        finetune_groups = _apply_finetune_protocol(model, model_type, train_cfg)
+        if finetune_groups is None:
+            optimizer = torch.optim.AdamW(
+                model.parameters(),
+                lr=float(train_cfg['learning_rate']),
+                weight_decay=float(train_cfg.get('weight_decay', 0.0)),
+            )
+        else:
+            optimizer = torch.optim.AdamW(
+                finetune_groups,
+                lr=float(train_cfg['learning_rate']),
+                weight_decay=float(train_cfg.get('weight_decay', 0.0)),
+            )
         scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'), epochs)
     history: list[dict[str, Any]] = list((evaluated_checkpoint or {}).get('history') or [])
     best_val = math.inf

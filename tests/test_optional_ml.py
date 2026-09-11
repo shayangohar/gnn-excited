@@ -211,3 +211,48 @@ def test_state_conditioned_model_injects_each_state_throughout_when_pyg_availabl
     assert output.shape == (1, 4)
     output.sum().backward()
     assert model.state_embedding.weight.grad is not None
+
+
+def test_finetune_protocol_freezes_bottom_and_scales_lrs_when_pyg_available() -> None:
+    pytest.importorskip('torch_geometric')
+    torch = pytest.importorskip('torch')
+    rng_state = torch.get_rng_state()
+    try:
+        from gnn_excited.models.visnet import build_visnet
+        from gnn_excited.train import _apply_finetune_protocol
+
+        model = build_visnet(
+            target_columns=('S1_eV', 'log1p_S1_f'),
+            hidden_channels=32,
+            num_layers=3,
+            num_rbf=8,
+            cutoff=3.0,
+            max_num_neighbors=8,
+        )
+        assert _apply_finetune_protocol(model, 'visnet', {'learning_rate': 0.001}) is None
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+        groups = _apply_finetune_protocol(
+            model,
+            'visnet',
+            {
+                'learning_rate': 0.001,
+                'weight_decay': 0.0,
+                'freeze_bottom_blocks': 1,
+                'backbone_lr_scale': 0.1,
+                'layerwise_lr_decay': 0.5,
+            },
+        )
+        assert groups is not None
+        assert not any(p.requires_grad for p in model.encoder.embedding.parameters())
+        assert not any(p.requires_grad for p in model.encoder.vis_mp_layers[0].parameters())
+        assert any(p.requires_grad for p in model.encoder.vis_mp_layers[2].parameters())
+        lrs = sorted(g['lr'] for g in groups)
+        assert lrs[0] < lrs[-1] == 0.001
+        assert all(len(g['params']) > 0 for g in groups)
+    finally:
+        torch.set_rng_state(rng_state)
+
+
+def _short_name(module) -> str:
+    return type(module).__name__
