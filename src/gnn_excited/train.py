@@ -808,11 +808,16 @@ def evaluate(
                     (oscillator_pred > max_float64_log).sum().item()
                 )
                 if include_physical_oscillator_metrics:
-                    _require_finite(
-                        torch.expm1(oscillator_pred),
-                        'physical oscillator predictions',
-                        batch,
-                    )
+                    try:
+                        _require_finite(
+                            torch.expm1(oscillator_pred),
+                            'physical oscillator predictions',
+                            batch,
+                        )
+                    except FloatingPointError:
+                        if bool((config or {}).get('training', {}).get('skip_nonfinite_batches', False)):
+                            continue
+                        raise
             loss = _training_loss(
                 pred,
                 target,

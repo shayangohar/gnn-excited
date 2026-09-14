@@ -148,6 +148,40 @@ def test_nonfinite_guard_reports_molecule_keys() -> None:
         _require_finite(torch.tensor([float("nan")]), "training loss", batch)
 
 
+def test_evaluate_skip_flag_covers_physical_oscillator_overflow() -> None:
+    torch = pytest.importorskip("torch")
+
+    class Batch(SimpleNamespace):
+        def to(self, _device):
+            return self
+
+    class ExplodingOscillatorModel(torch.nn.Module):
+        def forward(self, _z, _pos, _batch):
+            # Finite raw log-prediction whose expm1 overflows float64.
+            return torch.tensor([[0.5, 1000.0]])
+
+    batch = Batch(
+        z=torch.tensor([1]),
+        pos=torch.zeros((1, 3)),
+        batch=torch.zeros(1, dtype=torch.long),
+        y=torch.tensor([[0.4, 0.0]]),
+        molecule_key=["mol-1"],
+    )
+    columns = ("S1_eV", "log1p_S1_f")
+
+    with pytest.raises(FloatingPointError, match="physical oscillator"):
+        evaluate(ExplodingOscillatorModel(), [batch], "cpu", columns)
+
+    skipped = evaluate(
+        ExplodingOscillatorModel(),
+        [batch],
+        "cpu",
+        columns,
+        config={"training": {"skip_nonfinite_batches": True}},
+    )
+    assert skipped["loss"] == pytest.approx(0.0)
+
+
 def test_wandb_run_disabled_without_importing_wandb() -> None:
     run = WandbRun({"wandb": {"enabled": False}}, {"config_path": "config.yaml"})
 
