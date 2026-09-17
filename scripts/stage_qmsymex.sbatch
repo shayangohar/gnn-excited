@@ -32,13 +32,13 @@ if [ ! -f "$OUT" ]; then
 fi
 ls -lh "$OUT"
 
-# Integrity probe, then extract.
+# Integrity probe, then extract (no `| head` under `set -o pipefail`: SIGPIPE=141).
 tar -tf "$OUT" > data/raw/qmsymex/contents.txt
 wc -l data/raw/qmsymex/contents.txt
 grep -c '\.xyz$' data/raw/qmsymex/contents.txt || true
 tar -xf "$OUT" -C data/raw/qmsymex
-ls data/raw/qmsymex | head
-XYZ=$(find data/raw/qmsymex -name 'QM_symex_*.xyz' | head -n 1)
+ls data/raw/qmsymex | head -n 20 || true
+XYZ=$(find data/raw/qmsymex -name 'QM_symex_*.xyz' | head -n 1 || true)
 echo "example: $XYZ"
 head -n 12 "$XYZ"
 find data/raw/qmsymex -name 'QM_symex_*.xyz' | wc -l
