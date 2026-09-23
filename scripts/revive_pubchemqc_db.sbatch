@@ -35,13 +35,19 @@ if [ ! -d "$IMG" ]; then
   # without squashfs and sidesteps it entirely.
   apptainer build --sandbox "$IMG" docker://postgres:12.3
 fi
-# Server in background; stop it on exit.
-apptainer exec --bind "$DATADIR:/var/lib/postgresql/data,$PGHOST:/var/run/postgresql" "$IMG" \
-  pg_ctl -D /var/lib/postgresql/data -o "-c listen_addresses='' -c unix_socket_directories=/var/run/postgresql -p $PGPORT" -l /tmp/pg.log start
-trap 'apptainer exec "$IMG" pg_ctl -D /var/lib/postgresql/data stop || true' EXIT
+# Run the sandbox's postgres binaries NATIVELY (no container mount
+# namespaces: apptainer --bind mounts proved unreliable here). The sandbox
+# dir is just files on lustre; host RHEL9 + LD_LIBRARY_PATH covers deps.
+PGBIN=/projects/bhzu/gnn-excited/tmp/pg12_sandbox/usr/lib/postgresql/12/bin
+PGLIB=/projects/bhzu/gnn-excited/tmp/pg12_sandbox/usr/lib/postgresql/12/lib:/projects/bhzu/gnn-excited/tmp/pg12_sandbox/usr/lib/x86_64-linux-gnu
+ls "$PGBIN/postgres" "$PGBIN/psql" "$PGBIN/pg_ctl"
+export LD_LIBRARY_PATH="$PGLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+ldd "$PGBIN/postgres" 2>/dev/null | grep 'not found' || echo DEPS-OK
+"$PGBIN/pg_ctl" -D "$DATADIR" -o "-c listen_addresses='' -c unix_socket_directories='$PGHOST' -p $PGPORT" -l /tmp/pg.log start
+trap '"$PGBIN/pg_ctl" -D "$DATADIR" stop || true' EXIT
 sleep 5
 export PGPASSWORD='3oAXwRkZ5r809Tj1FVbnF)JrQ'
-PSQL="apptainer exec $IMG psql -h $PGHOST -p $PGPORT -U pgrest -d db -At"
+PSQL="$PGBIN/psql -h $PGHOST -p $PGPORT -U pgrest -d db -At"
 $PSQL -c '\dt public.*'
 $PSQL -c "SELECT tablename FROM pg_tables WHERE schemaname='public';"
 for t in b3lyp molecules dataCompound compound; do
