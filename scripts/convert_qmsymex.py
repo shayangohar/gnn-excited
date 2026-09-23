@@ -118,11 +118,11 @@ def main() -> None:
         files = files[:args.limit]
     print(f"files: {len(files)}", flush=True)
 
-    header = (["id", "natoms"]
+    header = (["molecule_key", "natoms"]
               + [f"S{s}_eV" for s in range(1, N_STATES + 1)]
               + [f"T{s}_eV" for s in range(1, N_STATES + 1)]
               + [f"S{s}_f" for s in range(1, N_STATES + 1)]
-              + ["split"])
+              + ["split", "status"])
     kept = scanned = skipped_parse = skipped_size = 0
     out_h5 = Path(args.out_h5)
     out_h5.parent.mkdir(parents=True, exist_ok=True)
@@ -156,7 +156,7 @@ def main() -> None:
                    + [f"{v:.6f}" for v in S_eV]
                    + [f"{v:.6f}" for v in T_eV]
                    + [f"{v:.6f}" for v in S_f]
-                   + [split])
+                   + [split, "ok"])
             csv.write(",".join(row) + "\n")
             kept += 1
     print(f"done: scanned={scanned} kept={kept} skipped_parse={skipped_parse} skipped_size={skipped_size}", flush=True)

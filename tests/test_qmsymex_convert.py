@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from convert_qmsymex import parse_qmsymex_file
@@ -43,3 +45,46 @@ def test_parse_qmsymex_rejects_bad_file(tmp_path):
     path = tmp_path / "QM_symex_000002.xyz"
     path.write_text("not-an-xyz\n", encoding="utf-8")
     assert parse_qmsymex_file(path) is None
+
+
+def test_qmsymex_dataset_reads_h5_rows(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch_geometric")
+    h5py = pytest.importorskip("h5py")
+    np = pytest.importorskip("numpy")
+    from gnn_excited.data.qmsymex import QMSymexSTDataset
+
+    xyz = tmp_path / "QM_symex_000001.xyz"
+    xyz.write_text("\n".join(_example_lines()) + "\n", encoding="utf-8")
+    numbers, positions, S_eV, T_eV, S_f = parse_qmsymex_file(xyz)
+    h5_path = tmp_path / "train.h5"
+    with h5py.File(h5_path, "w") as h5:
+        root = h5.create_group("m")
+        grp = root.create_group("QM_symex_000001")
+        grp.create_dataset("numbers", data=numbers)
+        grp.create_dataset("positions", data=positions)
+        grp.create_dataset("S_eV", data=S_eV)
+        grp.create_dataset("T_eV", data=T_eV)
+        grp.create_dataset("S_f", data=S_f)
+    manifest = tmp_path / "manifest.csv"
+    cols = (["molecule_key", "natoms"]
+            + [f"S{s}_eV" for s in range(1, 11)]
+            + [f"T{s}_eV" for s in range(1, 11)]
+            + [f"S{s}_f" for s in range(1, 11)]
+            + ["split", "status"])
+    manifest.write_text(
+        ",".join(cols) + "\n" + ",".join(
+            ["QM_symex_000001", "2"]
+            + [f"{v:.6f}" for v in S_eV]
+            + [f"{v:.6f}" for v in T_eV]
+            + [f"{v:.6f}" for v in S_f]
+            + ["train", "ok"]) + "\n",
+        encoding="utf-8",
+    )
+    ds = QMSymexSTDataset(h5_path, manifest)
+    assert ds.len() == 1
+    data = ds.get(0)
+    assert data.z.tolist() == [6, 1]
+    assert data.y.shape == (1, 10)
+    assert float(data.y[0, 0]) == pytest.approx(5.0)
+    assert float(data.y[0, 5]) == pytest.approx(3.0)
