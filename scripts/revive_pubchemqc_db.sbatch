@@ -28,9 +28,12 @@ export PGPORT=55433
 export PGHOST=/tmp/pqc_sock
 mkdir -p "$PGHOST"
 DATADIR=/projects/bhzu/gnn-excited/data/raw/pubchemqc/pgdata/postgrest-docker-compose/data/postgresql/lib
-IMG=tmp/postgres_12.3.sif
-if [ ! -f "$IMG" ]; then
-  apptainer pull "$IMG" docker://postgres:12.3
+IMG=tmp/pg12_sandbox
+if [ ! -d "$IMG" ]; then
+  # NOTE: `apptainer pull` (OCI->SIF) segfaults mksquashfs on this system
+  # (exit 139, both node-local and lustre tmp); --sandbox unpacks layers
+  # without squashfs and sidesteps it entirely.
+  apptainer build --sandbox "$IMG" docker://postgres:12.3
 fi
 # Server in background; stop it on exit.
 apptainer exec --bind "$DATADIR:/var/lib/postgresql/data,$PGHOST:/var/run/postgresql" "$IMG" \
