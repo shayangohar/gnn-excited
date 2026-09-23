@@ -17,8 +17,13 @@
 # report schema + row counts (extraction of the JSON records comes next).
 set -euo pipefail
 cd /projects/bhzu/gnn-excited
-mkdir -p runs tmp/apptainer_cache
+mkdir -p runs tmp/apptainer_cache tmp/apptainer_tmp
 export APPTAINER_CACHEDIR=/projects/bhzu/gnn-excited/tmp/apptainer_cache
+# mksquashfs segfaults (139) with node-local /tmp during OCI->SIF build;
+# point all scratch space at the roomy project filesystem.
+export APPTAINER_TMPDIR=/projects/bhzu/gnn-excited/tmp/apptainer_tmp
+export TMPDIR=/projects/bhzu/gnn-excited/tmp/apptainer_tmp
+export SINGULARITY_TMPDIR=/projects/bhzu/gnn-excited/tmp/apptainer_tmp
 export PGPORT=55433
 export PGHOST=/tmp/pqc_sock
 mkdir -p "$PGHOST"
