@@ -1,23 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=pqc_extract
+#SBATCH --job-name=pqc_bounds
 #SBATCH --output=runs/%x.%j.%N.out
 #SBATCH --error=runs/%x.%j.%N.err
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=12:00:00
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=16G
+#SBATCH --time=02:00:00
 #SBATCH --account=bhzu-delta-cpu
 #SBATCH --constraint="projects&work"
 #SBATCH --mail-user=shayangohar@mail.fresnostate.edu
 #SBATCH --mail-type=END,FAIL
 
-# TASK-217: stream public.b3lyp (3.98M rows) from the revived pg12 server
-# straight into training HDF5 (schema pubchemqc-st-v1). LIMIT=0 means all.
+# TASK-217: report cid boundaries for 8-way chunking (500k-row steps).
 set -euo pipefail
 cd /projects/bhzu/gnn-excited
-mkdir -p runs data/processed/pubchemqc
+mkdir -p runs
 export PGPORT=55433
 export PGHOST=/tmp/pqc_sock
 mkdir -p "$PGHOST"
@@ -28,14 +27,10 @@ export LD_LIBRARY_PATH="$PGLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 "$PGBIN/pg_ctl" -D "$DATADIR" -o "-c listen_addresses='' -c unix_socket_directories='$PGHOST' -p $PGPORT" -l /tmp/pg.log start
 trap '"$PGBIN/pg_ctl" -D "$DATADIR" stop || true' EXIT
 sleep 5
-source envs/gnn-excited-delta/bin/activate
-LIMIT=${LIMIT:-0}
-MIN_CID=${MIN_CID:-0}
-MAX_CID=${MAX_CID:-0}
-CHUNK=${CHUNK:-full}
-python scripts/extract_pubchemqc.py \
-  --socket-dir "$PGHOST" --port "$PGPORT" --password '3oAXwRkZ5r809Tj1FVbnF)JrQ' \
-  --out-h5 data/processed/pubchemqc/train_st_${CHUNK}.h5 \
-  --manifest data/processed/pubchemqc/train_st_${CHUNK}_manifest.csv \
-  --limit "$LIMIT" --min-cid "$MIN_CID" --max-cid "$MAX_CID"
-echo EXTRACT_DONE
+export PGPASSWORD='3oAXwRkZ5r809Tj1FVbnF)JrQ'
+PSQL="$PGBIN/psql -h $PGHOST -p $PGPORT -U pgrest -d db -At"
+$PSQL -c 'SELECT min(cid), max(cid), count(*) FROM public.b3lyp;'
+for n in 500000 1000000 1500000 2000000 2500000 3000000 3500000; do
+  $PSQL -c "SELECT cid FROM public.b3lyp ORDER BY cid LIMIT 1 OFFSET $n;"
+done
+echo BOUNDS_DONE

@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import signal
 
 import h5py
 import numpy as np
@@ -72,7 +73,17 @@ def main() -> None:
     parser.add_argument("--max-atoms", type=int, default=96)
     parser.add_argument("--val-fraction", type=float, default=0.05)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--min-cid", type=int, default=0)
+    parser.add_argument("--max-cid", type=int, default=0)
     args = parser.parse_args()
+
+    stop = False
+
+    def _handle_term(signum, frame):
+        global stop
+        stop = True
+
+    signal.signal(signal.SIGTERM, _handle_term)
 
     header = (["molecule_key", "inchikey", "smiles", "natoms"]
               + [f"S{s}_eV" for s in range(1, N_STATES + 1)]
@@ -90,8 +101,20 @@ def main() -> None:
         writer = csv.writer(csvfile)
         writer.writerow(header)
         cur.itersize = 10_000
-        cur.execute("SELECT cid, data FROM public.b3lyp ORDER BY cid")
+        query = "SELECT cid, data FROM public.b3lyp"
+        clauses = []
+        if args.min_cid:
+            clauses.append(f"cid >= {int(args.min_cid)}")
+        if args.max_cid:
+            clauses.append(f"cid <= {int(args.max_cid)}")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY cid"
+        cur.execute(query)
         for cid, data in cur:
+            if stop:
+                print(f"stopping early at cid={cid} (SIGTERM)", flush=True)
+                break
             scanned += 1
             if scanned % 200_000 == 0:
                 print(f"scanned={scanned} kept={kept}", flush=True)
