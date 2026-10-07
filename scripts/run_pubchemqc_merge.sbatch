@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --account=bhzu-delta-cpu
 #SBATCH --constraint="projects&work"
 #SBATCH --mail-user=shayangohar@mail.fresnostate.edu

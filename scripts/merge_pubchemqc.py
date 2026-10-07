@@ -43,6 +43,8 @@ def main() -> None:
                     for key in src["m"]:
                         src.copy(src["m"][key], root, name=key)
                         total += 1
+                        if total % 500_000 == 0:
+                            print(f"copied={total}", flush=True)
                 finally:
                     src.close()
                 with open(chunk_dir / f"train_st_{name}_manifest.csv", newline="", encoding="utf-8") as stream:
@@ -53,6 +55,7 @@ def main() -> None:
                     for row in reader:
                         writer.writerow(row)
                         splits[row["split"]] = splits.get(row["split"], 0) + 1
+            print(f"chunk {name} done", flush=True)
     print(f"merged molecules: {total}", flush=True)
     print(f"splits: {splits}", flush=True)
     with h5py.File(args.out_h5, "r") as h5:
