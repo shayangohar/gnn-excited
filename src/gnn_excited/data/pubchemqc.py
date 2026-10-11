@@ -92,16 +92,16 @@ class PubChemQCPackedDataset(Dataset):
         missing = [key for key in molecule_keys if key not in index]
         if missing:
             raise ValueError(f'{len(missing)} molecule keys missing from {self.hdf5_path}; first={missing[0]}')
-        self._indices = np.fromiter((index[key] for key in molecule_keys), dtype=np.int64, count=len(molecule_keys))
-        if self._indices.size == 0:
+        self._pack_rows = np.fromiter((index[key] for key in molecule_keys), dtype=np.int64, count=len(molecule_keys))
+        if self._pack_rows.size == 0:
             raise ValueError(f'No usable rows found in manifest {manifest_path}')
 
     def len(self) -> int:
-        return int(self._indices.size)
+        return int(self._pack_rows.size)
 
     def get(self, idx: int):
         arrays = load_packed_arrays(self.hdf5_path)
-        i = int(self._indices[idx])
+        i = int(self._pack_rows[idx])
         start, end = int(arrays['atom_offsets'][i]), int(arrays['atom_offsets'][i + 1])
         y = arrays['S_eV'][i, self._columns].astype(np.float32)
         return Data(

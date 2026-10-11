@@ -117,6 +117,9 @@ def test_packed_dataset_returns_requested_states(tmp_path):
     assert first.pos.shape == (4, 3)
     assert first.y.shape == (1, 2)
     assert first.y[0].tolist() == pytest.approx([5.0, 5.4], abs=1e-6)
+    # PyG Dataset owns self._indices; a subclass reusing that name double-maps rows.
+    assert dataset[1].molecule_key == "pqc_1"
+    assert dataset[1].y[0].tolist() == pytest.approx([3.0, 3.4], abs=1e-6)
     with pytest.raises(ValueError, match="singlets|S1_eV"):
         state_column_indices(("T1_eV",))
     with pytest.raises(ValueError, match="missing"):
