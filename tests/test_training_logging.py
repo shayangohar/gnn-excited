@@ -13,10 +13,12 @@ from gnn_excited.train import (
     WandbRun,
     build_loss_weights,
     build_scheduler,
+    checkpoint_selection_value,
     classify_validation_improvement,
     collect_run_metadata,
     evaluate,
     filter_manifest_exclusions,
+    resolve_checkpoint_metric,
     seed_everything,
     weighted_mse_loss,
     write_history_csv,
@@ -137,6 +139,41 @@ def test_validation_improvement_separates_checkpoint_from_early_stopping() -> No
 
     assert improvement["checkpoint_improved"] is True
     assert improvement["early_stopping_improved"] is False
+
+
+def test_checkpoint_metric_defaults_to_composite_val_loss() -> None:
+    assert resolve_checkpoint_metric({}) == "val_loss"
+    assert resolve_checkpoint_metric({"checkpoint_metric": "val_energy_eV_mae"}) == "val_energy_eV_mae"
+    with pytest.raises(ValueError, match="must name a validation metric"):
+        resolve_checkpoint_metric({"checkpoint_metric": "energy_eV_mae"})
+
+
+def test_checkpoint_metric_selects_different_epoch_than_val_loss() -> None:
+    # Mirrors incumbent rerun 22800885: epoch 27 wins on composite loss, epoch 35 on energy.
+    history = [
+        {"epoch": 27, "val_loss": 0.011157, "val_energy_eV_mae": 0.061056},
+        {"epoch": 35, "val_loss": 0.011169, "val_energy_eV_mae": 0.060497},
+    ]
+
+    def best_epoch(metric: str) -> int:
+        best_val, best = float("inf"), None
+        for record in history:
+            value = checkpoint_selection_value(record, metric)
+            if classify_validation_improvement(value, best_val, float("inf"), 0.0)["checkpoint_improved"]:
+                best_val, best = value, record["epoch"]
+        return best
+
+    assert best_epoch("val_loss") == 27
+    assert best_epoch("val_energy_eV_mae") == 35
+
+
+def test_checkpoint_metric_missing_from_record_fails_loudly() -> None:
+    record = {"epoch": 1, "val_loss": 0.5, "val_energy_eV_mae": float("nan")}
+
+    with pytest.raises(ValueError, match="val_S1_eV_mae.*available validation metrics"):
+        checkpoint_selection_value(record, "val_S1_eV_mae")
+    with pytest.raises(ValueError, match="missing or non-finite"):
+        checkpoint_selection_value(record, "val_energy_eV_mae")
 
 
 def test_nonfinite_guard_reports_molecule_keys() -> None:

@@ -911,6 +911,26 @@ def classify_validation_improvement(val_loss: float, best_val: float, early_stop
     }
 
 
+def resolve_checkpoint_metric(train_cfg: dict[str, Any]) -> str:
+    '''Validation metric (lower is better) that selects the saved checkpoint and drives early stopping.'''
+    metric = str(train_cfg.get('checkpoint_metric', 'val_loss'))
+    if not metric.startswith('val_'):
+        raise ValueError(f'training.checkpoint_metric must name a validation metric (val_*), got {metric!r}')
+    return metric
+
+
+def checkpoint_selection_value(record: dict[str, Any], checkpoint_metric: str) -> float:
+    '''Read the checkpoint-selection metric from an epoch record, failing loudly if it is absent.'''
+    value = record.get(checkpoint_metric)
+    if value is None or not math.isfinite(float(value)):
+        available = sorted(key for key in record if key.startswith('val_'))
+        raise ValueError(
+            f'training.checkpoint_metric {checkpoint_metric!r} is missing or non-finite at epoch '
+            f'{record.get("epoch")}; available validation metrics: {available}'
+        )
+    return float(value)
+
+
 def train_from_config(config_path: str | Path) -> dict[str, Any]:
     if _IMPORT_ERROR is not None:
         raise ModuleNotFoundError('Training requires torch and torch_geometric.') from _IMPORT_ERROR
@@ -1076,11 +1096,13 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             )
         scheduler = build_scheduler(optimizer, train_cfg.get('scheduler'), epochs)
     history: list[dict[str, Any]] = list((evaluated_checkpoint or {}).get('history') or [])
+    checkpoint_metric = resolve_checkpoint_metric(train_cfg)
     best_val = math.inf
+    best_epoch_val_loss = math.inf
     best_epoch: int | None = int(history[-1]['epoch']) if history and 'epoch' in history[-1] else None
-    historical_val_losses = [float(record['val_loss']) for record in history if 'val_loss' in record]
-    if historical_val_losses:
-        best_val = min(historical_val_losses)
+    historical_selection_values = [float(record[checkpoint_metric]) for record in history if checkpoint_metric in record]
+    if historical_selection_values:
+        best_val = min(historical_selection_values)
     early_stopping_best_val = math.inf
     min_delta = float(train_cfg.get('early_stopping_min_delta', 0.0))
     early_stopping_patience = train_cfg.get('early_stopping_patience')
@@ -1126,8 +1148,10 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             'normalize': normalize_loss_weights,
         },
         'config': config,
+        'checkpoint_metric': checkpoint_metric,
         'best_epoch': best_epoch,
-        'best_val_loss': best_val if math.isfinite(best_val) else None,
+        'best_val_loss': best_val if checkpoint_metric == 'val_loss' and math.isfinite(best_val) else None,
+        'best_checkpoint_metric_value': best_val if math.isfinite(best_val) else None,
         'latest_epoch': best_epoch or 0,
         'latest_metrics': None,
         'test_metrics': None,
@@ -1251,9 +1275,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             write_history_csv(metrics_csv_path, history)
             wandb_run.log_epoch(record)
 
-            improvement = classify_validation_improvement(val_loss, best_val, early_stopping_best_val, min_delta)
+            selection_value = checkpoint_selection_value(record, checkpoint_metric)
+            improvement = classify_validation_improvement(selection_value, best_val, early_stopping_best_val, min_delta)
             if improvement['checkpoint_improved']:
-                best_val = val_loss
+                best_val = selection_value
+                best_epoch_val_loss = val_loss
                 best_epoch = epoch
                 torch.save(
                     {
@@ -1266,15 +1292,17 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 )
 
             if improvement['early_stopping_improved']:
-                early_stopping_best_val = val_loss
+                early_stopping_best_val = selection_value
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
+            best_val_loss = best_val if checkpoint_metric == 'val_loss' else best_epoch_val_loss
             run_summary.update(
                 {
                     'updated_at': _utc_now(),
                     'best_epoch': best_epoch,
-                    'best_val_loss': best_val if math.isfinite(best_val) else None,
+                    'best_val_loss': best_val_loss if math.isfinite(best_val_loss) else None,
+                    'best_checkpoint_metric_value': best_val if math.isfinite(best_val) else None,
                     'latest_epoch': epoch,
                     'latest_metrics': record,
                     'stopped_early': stopped_early,
@@ -1285,7 +1313,11 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
 
             if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
                 stopped_early = True
-                stop_reason = f'validation loss did not improve for {early_stopping_patience} epochs'
+                stop_reason = (
+                    f'validation loss did not improve for {early_stopping_patience} epochs'
+                    if checkpoint_metric == 'val_loss'
+                    else f'{checkpoint_metric} did not improve for {early_stopping_patience} epochs'
+                )
                 run_summary.update(
                     {
                         'status': 'stopped_early',
