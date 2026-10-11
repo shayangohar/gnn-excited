@@ -767,11 +767,12 @@ def load_transfer_checkpoint(
         "readout_only",
         "full_finetune",
         "encoder_finetune",
+        "encoder_energy_finetune",
         "frozen_sidecar",
     }:
         raise ValueError(
             "transfer mode must be readout_only, full_finetune, encoder_finetune, "
-            "or frozen_sidecar"
+            "encoder_energy_finetune, or frozen_sidecar"
         )
     state = _checkpoint_state(checkpoint, map_location)
     if mode == "frozen_sidecar":
@@ -803,6 +804,31 @@ def load_transfer_checkpoint(
             for key, value in state.items()
             if not key.startswith("oscillator_head.")
         }
+    if mode == "encoder_energy_finetune":
+        # Energy-only donors (e.g. PubChemQC S1-S5) match the energy readout but
+        # carry no oscillator head; keep the energy head, start oscillators fresh.
+        partial_state = {
+            key: value
+            for key, value in state.items()
+            if key.startswith(("encoder.", "energy_head."))
+        }
+        model_parameters = dict(model.state_dict())
+        mismatched = sorted(
+            key
+            for key, value in partial_state.items()
+            if key in model_parameters and tuple(model_parameters[key].shape) != tuple(value.shape)
+        )
+        if mismatched:
+            raise ValueError(f"Energy readout shape mismatch for encoder_energy_finetune: {mismatched}")
+        missing, unexpected = model.load_state_dict(partial_state, strict=False)
+        missing_loaded = [key for key in missing if key.startswith(("encoder.", "energy_head."))]
+        if missing_loaded or unexpected:
+            raise ValueError(
+                f"Incompatible ViSNet encoder/energy checkpoint: missing={sorted(missing_loaded)}, "
+                f"unexpected={sorted(unexpected)}"
+            )
+        model.unfreeze_encoder()
+        return model
     if mode == "encoder_finetune":
         encoder_state = {
             key: value for key, value in state.items() if key.startswith("encoder.")

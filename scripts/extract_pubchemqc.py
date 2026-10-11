@@ -80,7 +80,7 @@ def main() -> None:
     stop = False
 
     def _handle_term(signum, frame):
-        global stop
+        nonlocal stop
         stop = True
 
     signal.signal(signal.SIGTERM, _handle_term)
