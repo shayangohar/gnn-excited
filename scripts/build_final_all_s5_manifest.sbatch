@@ -19,6 +19,5 @@ cd /projects/bhzu/gnn-excited
 mkdir -p data/processed runs
 source /etc/profile.d/modules.sh
 module purge
-module load cudatoolkit/25.3_12.8
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 python scripts/build_manifest.py --hdf5 data/final_all.hdf5 --out data/processed/final_all_manifest_s5.csv --singlets 5 --triplets 0 --progress-every 5000

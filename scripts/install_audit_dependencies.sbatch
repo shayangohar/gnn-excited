@@ -19,7 +19,6 @@ cd /projects/bhzu/gnn-excited
 mkdir -p runs
 source /etc/profile.d/modules.sh
 module purge
-module load cudatoolkit/25.3_12.8
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 python -m pip install --no-deps "rdkit>=2023.9"
 python -c "import rdkit; print(rdkit.__version__)"

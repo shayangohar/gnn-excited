@@ -23,7 +23,6 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 source /etc/profile.d/modules.sh
 module purge
-module load cudatoolkit/25.3_12.8
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 python -c 'import torch; assert torch.cuda.is_available(), "CUDA is unavailable"; print(f"torch={torch.__version__} cuda={torch.version.cuda} gpu={torch.cuda.get_device_name(0)}")'
 python scripts/train_dimenet.py --config configs/final_all_s5_split_heads.yaml

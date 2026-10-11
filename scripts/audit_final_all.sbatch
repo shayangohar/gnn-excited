@@ -23,7 +23,6 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 source /etc/profile.d/modules.sh
 module purge
-module load cudatoolkit/25.3_12.8
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 
 RAW_DATA=/work/hdd/bhzu/gnn-excited/data

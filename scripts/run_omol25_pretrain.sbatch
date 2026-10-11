@@ -10,6 +10,8 @@
 #SBATCH --mem=96G
 #SBATCH --time=24:00:00
 #SBATCH --account=bhzu-delta-gpu
+#SBATCH --mail-user=shayangohar@mail.fresnostate.edu
+#SBATCH --mail-type=END,FAIL
 
 set -euo pipefail
 cd /projects/bhzu/gnn-excited

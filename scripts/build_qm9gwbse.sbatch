@@ -19,7 +19,6 @@ cd /projects/bhzu/gnn-excited
 mkdir -p data/processed/qm9gwbse runs
 source /etc/profile.d/modules.sh
 module purge
-module load cudatoolkit/25.3_12.8
 source /projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/activate
 python scripts/build_qm9gwbse.py \
   --raw-dir data/raw/qm9gwbse \

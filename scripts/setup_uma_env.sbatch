@@ -31,7 +31,7 @@ pip install --upgrade pip
 pip install fairchem-core huggingface_hub
 python -c 'import fairchem, torch; print("fairchem ok, torch", torch.__version__)'
 
-# UMA-S checkpoint + config (UMA-S ~150M params / 6M active MoLE).
+# UMA-S checkpoint + config (UMA-S ~291M params / ~6.4M active MoLE).
 python - <<'EOF'
 from huggingface_hub import snapshot_download
 path = snapshot_download(
