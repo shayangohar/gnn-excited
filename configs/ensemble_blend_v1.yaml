@@ -1,0 +1,54 @@
+# TASK-244: UMA + ViSNet blends, weights chosen on val (scripts/blend_predictions.py).
+grid_step: 0.05
+members:
+  uma_2e4_s17:
+    val: runs/ensemble_preds/uma_blr2e-4_s17.val_predictions.csv
+    test: runs/ensemble_preds/uma_blr2e-4_s17.test_predictions.csv
+  uma_2e4_s18:
+    val: runs/uma_qm9gwbse_finetune_blr2e-4_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_finetune_blr2e-4_s18.test_predictions.csv
+  uma_2e4_s19:
+    val: runs/uma_qm9gwbse_finetune_blr2e-4_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_finetune_blr2e-4_s19.test_predictions.csv
+  uma_4e4_s17:
+    val: runs/uma_qm9gwbse_finetune_blr4e-4.val_predictions.csv
+    test: runs/uma_qm9gwbse_finetune_blr4e-4.test_predictions.csv
+  anchor_s17:
+    val: runs/ensemble_preds/anchor_s17.val_predictions.csv
+    test: runs/ensemble_preds/anchor_s17.test_predictions.csv
+  anchor_s18:
+    val: runs/ensemble_preds/anchor_s18.val_predictions.csv
+    test: runs/ensemble_preds/anchor_s18.test_predictions.csv
+  anchor_s19:
+    val: runs/ensemble_preds/anchor_s19.val_predictions.csv
+    test: runs/ensemble_preds/anchor_s19.test_predictions.csv
+  anchor_s20:
+    val: runs/ensemble_preds/anchor_s20.val_predictions.csv
+    test: runs/ensemble_preds/anchor_s20.test_predictions.csv
+  anchor_s21:
+    val: runs/ensemble_preds/anchor_s21.val_predictions.csv
+    test: runs/ensemble_preds/anchor_s21.test_predictions.csv
+  pqc_e10_s17:
+    val: runs/ensemble_preds/pqc_e10_s17.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e10_s17.test_predictions.csv
+groups:
+  anchored:
+  - anchor_s17
+  - anchor_s18
+  - anchor_s19
+  - anchor_s20
+  - anchor_s21
+  uma_2e4:
+  - uma_2e4_s17
+  - uma_2e4_s18
+  - uma_2e4_s19
+blends:
+- - uma_2e4_s17
+  - anchored
+- - uma_2e4
+  - anchored
+- - uma_4e4_s17
+  - anchored
+- - uma_2e4
+  - anchored
+  - pqc_e10_s17

@@ -293,7 +293,9 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
              "weight_decay": float(train_cfg.get("head_weight_decay", 1e-3))},
         ]
     )
-    epochs = int(train_cfg["epochs"])
+    # evaluation.checkpoint_path: score an existing checkpoint on val and test, no training.
+    eval_checkpoint = (config.get("evaluation") or {}).get("checkpoint_path")
+    epochs = 0 if eval_checkpoint else int(train_cfg["epochs"])
     steps_per_epoch = len(train_loader)
     sched_cfg = train_cfg.get("scheduler") or {}
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -344,6 +346,7 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
         },
         "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
         "wandb_run_id": getattr(wandb_run, "id", None),
+        "evaluation_checkpoint_path": eval_checkpoint,
     }
     print(json.dumps({k: summary[k] for k in ("split_sizes", "parameters", "gpu")}), flush=True)
 
@@ -417,13 +420,18 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             print(summary["stop_reason"], flush=True)
             break
 
-    best = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    best = torch.load(eval_checkpoint or checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(best["model_state_dict"])
+    if eval_checkpoint:
+        best_epoch = best.get("epoch")
     keys = [str(k) for k in arrays["molecule_key"]]
     predictions_path = summary_path.with_name(summary_path.name.replace(".summary.json", ".test_predictions.csv"))
+    val_predictions_path = summary_path.with_name(summary_path.name.replace(".summary.json", ".val_predictions.csv"))
+    val_metrics = evaluate(model, val_loader, target_columns, loss_cfg, device, autocast_dtype, keys, val_predictions_path)
     test_metrics = evaluate(model, test_loader, target_columns, loss_cfg, device, autocast_dtype, keys, predictions_path)
-    summary.update(status="completed", completed_at=_utc_now(), test_metrics=test_metrics,
-                   predictions_csv_path=str(predictions_path))
+    summary.update(status="completed", completed_at=_utc_now(), best_epoch=best_epoch, val_metrics=val_metrics,
+                   test_metrics=test_metrics, predictions_csv_path=str(predictions_path),
+                   val_predictions_csv_path=str(val_predictions_path))
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("TEST " + json.dumps(test_metrics), flush=True)
     if wandb_run is not None:

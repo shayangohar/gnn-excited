@@ -1108,6 +1108,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
     early_stopping_patience = train_cfg.get('early_stopping_patience')
     early_stopping_patience = int(early_stopping_patience) if early_stopping_patience is not None else None
     max_grad_norm = float(train_cfg.get('max_grad_norm', 0.0))
+    log_batch_loss_above = train_cfg.get('log_batch_loss_above')
+    log_batch_loss_above = float(log_batch_loss_above) if log_batch_loss_above is not None else None
     denoising = bool(train_cfg.get('denoising', False))
     denoise_sigma = float(train_cfg.get('denoise_sigma', 0.1))
     denoise_sigma_max = float(train_cfg.get('denoise_sigma_max', 0.6))
@@ -1236,7 +1238,14 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                     raise FloatingPointError(f'Non-finite training gradient norm; molecule_keys={keys}') from exc
                 optimizer.step()
                 batch_n = batch.pos.size(0) if denoising else target.shape[0]
-                total_loss += loss.item() * batch_n
+                batch_loss = loss.item()
+                if log_batch_loss_above is not None and batch_loss > log_batch_loss_above:
+                    print(
+                        f'HIGH_BATCH_LOSS epoch={epoch} loss={batch_loss:.6g} '
+                        f'molecule_keys={list(getattr(batch, "molecule_key", None) or [])}',
+                        flush=True,
+                    )
+                total_loss += batch_loss * batch_n
                 total_n += batch_n
                 if not denoising and loss_weights_tensor is not None:
                     total_unweighted_loss += weighted_mse_loss(pred.detach(), target).item() * batch_n
@@ -1356,6 +1365,21 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
             predictions_csv_path=predictions_csv_path,
             target_scale=target_scale,
         ) if len(test_ds) else {}
+        val_predictions_csv_path = evaluation_cfg.get('val_predictions_csv_path')
+        final_val_metrics = None
+        if val_predictions_csv_path and not evaluation_checkpoint_paths and len(val_ds):
+            # Same selected weights as the test pass; lets ensembles pick blend weights on val.
+            final_val_metrics = evaluate(
+                model,
+                val_loader,
+                device,
+                target_columns,
+                loss_weights_tensor,
+                normalize_loss_weights,
+                config,
+                predictions_csv_path=val_predictions_csv_path,
+                target_scale=target_scale,
+            )
         per_subset_test_metrics: dict[str, dict[str, float]] = {}
         if bool(dataset_cfg.get('report_subset_metrics', False)):
             for subset_index, (subset_name, subset_keys) in enumerate(test_subset_key_groups.items()):
@@ -1386,6 +1410,8 @@ def train_from_config(config_path: str | Path) -> dict[str, Any]:
                 'test_metrics': test_metrics,
                 'per_subset_test_metrics': per_subset_test_metrics,
                 'predictions_csv_path': str(predictions_csv_path) if predictions_csv_path else None,
+                'val_metrics': final_val_metrics,
+                'val_predictions_csv_path': str(val_predictions_csv_path) if final_val_metrics is not None else None,
             }
         )
         write_summary_json(summary_json_path, run_summary)
