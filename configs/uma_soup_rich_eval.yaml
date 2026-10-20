@@ -1,0 +1,65 @@
+# TASK-250 L2: eval-only uniform weight soup of 3 UMA checkpoints.
+model:
+  checkpoint_path: checkpoints/uma/checkpoints/uma-s-1p2p1.pt
+  head_hidden: 256
+  readout: rich
+  readout_layers: 1
+  lmax: 2
+dataset:
+  packed_path: data/processed/qm9gwbse/qm9gwbse_packed.npz
+targets:
+  columns:
+  - S1_eV
+  - log1p_S1_f
+  - S2_eV
+  - log1p_S2_f
+  - S3_eV
+  - log1p_S3_f
+  - S4_eV
+  - log1p_S4_f
+  - S5_eV
+  - log1p_S5_f
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 1.0
+  gap_weight: 0.1
+  ordering_weight: 0.01
+training:
+  device: cuda
+  seed: 17
+  epochs: 40
+  batch_size: 64
+  backbone_lr: 0.0002
+  head_lr: 0.001
+  backbone_weight_decay: 0.0
+  head_weight_decay: 0.001
+  max_grad_norm: 1.0
+  bf16: false
+  mole_split_patch: true
+  num_workers: 8
+  max_hours: 22
+  scheduler:
+    warmup_epochs: 2
+    start_factor: 0.01
+    min_factor: 0.01
+  checkpoint_path: checkpoints/uma_eval_unused.pt
+  metrics_csv_path: runs/ensemble_preds/uma_soup_rich.metrics.csv
+  summary_json_path: runs/ensemble_preds/uma_soup_rich.summary.json
+wandb:
+  enabled: false
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: uma_qm9gwbse_finetune_blr2e-4
+  group: uma-transfer
+  tags:
+  - QM9GWBSE
+  - S1-S5
+  - UMA-S
+  - foundation-model
+  - full-finetune
+evaluation:
+  soup_checkpoint_paths:
+  - checkpoints/uma_qm9gwbse_rich_s17.pt
+  - checkpoints/uma_qm9gwbse_rich_s18.pt
+  - checkpoints/uma_qm9gwbse_rich_s19.pt

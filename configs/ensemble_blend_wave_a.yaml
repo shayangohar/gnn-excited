@@ -1,0 +1,79 @@
+# TASK-250: new UMA families (and soups) blended with PubChemQC-e20 x3; weights on val.
+grid_step: 0.05
+members:
+  pqc_e20_s17:
+    val: runs/ensemble_preds/pqc_e20_s17.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s17.test_predictions.csv
+  pqc_e20_s18:
+    val: runs/ensemble_preds/pqc_e20_s18.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s18.test_predictions.csv
+  pqc_e20_s19:
+    val: runs/ensemble_preds/pqc_e20_s19.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s19.test_predictions.csv
+  uma_2e4_s17:
+    val: runs/ensemble_preds/uma_blr2e-4_s17.val_predictions.csv
+    test: runs/ensemble_preds/uma_blr2e-4_s17.test_predictions.csv
+  uma_2e4_s18:
+    val: runs/uma_qm9gwbse_finetune_blr2e-4_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_finetune_blr2e-4_s18.test_predictions.csv
+  uma_2e4_s19:
+    val: runs/uma_qm9gwbse_finetune_blr2e-4_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_finetune_blr2e-4_s19.test_predictions.csv
+  uma_stab_s17:
+    val: runs/uma_qm9gwbse_stab_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_stab_s17.test_predictions.csv
+  uma_stab_s18:
+    val: runs/uma_qm9gwbse_stab_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_stab_s18.test_predictions.csv
+  uma_stab_s19:
+    val: runs/uma_qm9gwbse_stab_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_stab_s19.test_predictions.csv
+  uma_rich_s17:
+    val: runs/uma_qm9gwbse_rich_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s17.test_predictions.csv
+  uma_rich_s18:
+    val: runs/uma_qm9gwbse_rich_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s18.test_predictions.csv
+  uma_rich_s19:
+    val: runs/uma_qm9gwbse_rich_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s19.test_predictions.csv
+  uma_soup_2e4_old:
+    val: runs/ensemble_preds/uma_soup_2e4_old.val_predictions.csv
+    test: runs/ensemble_preds/uma_soup_2e4_old.test_predictions.csv
+  uma_soup_stab:
+    val: runs/ensemble_preds/uma_soup_stab.val_predictions.csv
+    test: runs/ensemble_preds/uma_soup_stab.test_predictions.csv
+  uma_soup_rich:
+    val: runs/ensemble_preds/uma_soup_rich.val_predictions.csv
+    test: runs/ensemble_preds/uma_soup_rich.test_predictions.csv
+groups:
+  pqc_e20:
+  - pqc_e20_s17
+  - pqc_e20_s18
+  - pqc_e20_s19
+  uma_2e4:
+  - uma_2e4_s17
+  - uma_2e4_s18
+  - uma_2e4_s19
+  uma_stab:
+  - uma_stab_s17
+  - uma_stab_s18
+  - uma_stab_s19
+  uma_rich:
+  - uma_rich_s17
+  - uma_rich_s18
+  - uma_rich_s19
+blends:
+- - uma_2e4
+  - pqc_e20
+- - uma_stab
+  - pqc_e20
+- - uma_rich
+  - pqc_e20
+- - uma_soup_stab
+  - pqc_e20
+- - uma_soup_rich
+  - pqc_e20
+- - uma_stab
+  - uma_rich
+  - pqc_e20

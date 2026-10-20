@@ -18,6 +18,7 @@ import csv
 import json
 import math
 import random
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -113,16 +114,72 @@ def _head(embed_dim: int, hidden: int, out_dim: int) -> nn.Sequential:
     return head
 
 
-class UMAExcitedState(nn.Module):
-    """UMA backbone l=0 embeddings -> per-atom heads -> per-molecule mean, in target units."""
+def spherical_invariants(x: torch.Tensor) -> torch.Tensor:
+    """[N, (lmax+1)^2, C] spherical features -> [N, (lmax+1)*C]: the l=0 channel plus per-l channel norms."""
+    lmax = int(round(x.shape[1] ** 0.5)) - 1
+    if (lmax + 1) ** 2 != x.shape[1]:
+        raise ValueError(f"expected (lmax+1)^2 spherical components, got {x.shape[1]}")
+    parts = [x[:, 0, :]] + [x[:, l * l:(l + 1) ** 2, :].norm(dim=1) for l in range(1, lmax + 1)]
+    return torch.cat(parts, dim=-1)
 
-    def __init__(self, backbone, target_columns, target_mean, target_std, embed_dim: int = 128, head_hidden: int = 256):
+
+def _capture_block_output(module, inputs, output):
+    # Stored on the block itself (not a closure) so deep copies (EMA) capture their own outputs.
+    module._gnn_captured = output[0] if isinstance(output, tuple) else output
+
+
+class _PooledHead(nn.Module):
+    """Per-atom trunk, then mean+std (first two cumulants) pooling per molecule, then a zero-init output layer."""
+
+    def __init__(self, in_dim: int, hidden: int, out_dim: int):
+        super().__init__()
+        self.trunk = nn.Sequential(nn.LayerNorm(in_dim), nn.Linear(in_dim, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU())
+        self.out = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.SiLU(), nn.Linear(hidden, out_dim))
+        nn.init.zeros_(self.out[-1].weight)
+        nn.init.zeros_(self.out[-1].bias)
+
+    def forward(self, per_atom, node_batch, num_molecules):
+        h = self.trunk(per_atom)
+        counts = torch.bincount(node_batch, minlength=num_molecules).clamp_min(1).unsqueeze(1).to(h.dtype)
+        mean = h.new_zeros(num_molecules, h.size(1)).index_add_(0, node_batch, h) / counts
+        second = h.new_zeros(num_molecules, h.size(1)).index_add_(0, node_batch, h * h) / counts
+        std = (second - mean * mean).clamp_min(0.0).add(1e-6).sqrt()
+        return self.out(torch.cat([mean, std], dim=-1))
+
+
+class UMAExcitedState(nn.Module):
+    """UMA backbone embeddings -> heads -> per-molecule outputs, in target units.
+
+    readout="l0_mean" (TASK-211): l=0 node features, per-atom heads, per-molecule mean.
+    readout="rich" (TASK-250, DOC-248 L3): l=0 plus per-l norms of the final embedding and of the
+    last `readout_layers` block outputs, mean+std pooled.
+    """
+
+    def __init__(self, backbone, target_columns, target_mean, target_std, embed_dim: int = 128, head_hidden: int = 256,
+                 readout: str = "l0_mean", readout_layers: int = 0, lmax: int = 2):
         super().__init__()
         self.backbone = backbone
+        self.readout = readout
+        self.readout_layers = int(readout_layers)
         self.target_columns = tuple(target_columns)
         self.energy_indices, self.oscillator_indices = target_layout(self.target_columns)
-        self.energy_head = _head(embed_dim, head_hidden, len(self.energy_indices))
-        self.oscillator_head = _head(embed_dim, head_hidden, len(self.oscillator_indices)) if self.oscillator_indices else None
+        if readout == "l0_mean":
+            if self.readout_layers:
+                raise ValueError("readout_layers requires readout='rich'")
+            self.energy_head = _head(embed_dim, head_hidden, len(self.energy_indices))
+            self.oscillator_head = _head(embed_dim, head_hidden, len(self.oscillator_indices)) if self.oscillator_indices else None
+        elif readout == "rich":
+            in_dim = embed_dim * (lmax + 1) * (1 + self.readout_layers)
+            self.energy_head = _PooledHead(in_dim, head_hidden, len(self.energy_indices))
+            self.oscillator_head = _PooledHead(in_dim, head_hidden, len(self.oscillator_indices)) if self.oscillator_indices else None
+            if self.readout_layers:
+                blocks = getattr(backbone, "blocks", None)
+                if blocks is None or len(blocks) < self.readout_layers + 1:
+                    raise ValueError("readout_layers needs backbone.blocks with enough blocks")
+                for k in range(1, self.readout_layers + 1):
+                    blocks[-1 - k].register_forward_hook(_capture_block_output)
+        else:
+            raise ValueError(f"unknown readout {readout!r}")
         self.register_buffer("target_mean", torch.as_tensor(target_mean, dtype=torch.float32))
         self.register_buffer("target_std", torch.as_tensor(target_std, dtype=torch.float32))
 
@@ -132,8 +189,17 @@ class UMAExcitedState(nn.Module):
     def forward(self, batch):
         num_molecules = int(batch.natoms.numel())
         embedding = self.backbone(batch)
-        scalars = embedding["node_embedding"][:, 0, :].float()
         node_batch = embedding["batch"]
+        if self.readout == "rich":
+            xs = [embedding["node_embedding"]]
+            xs += [self.backbone.blocks[-1 - k]._gnn_captured for k in range(1, self.readout_layers + 1)]
+            per_atom = torch.cat([spherical_invariants(x.float()) for x in xs], dim=-1)
+            out = per_atom.new_empty(num_molecules, len(self.target_columns))
+            out[:, list(self.energy_indices)] = self.energy_head(per_atom, node_batch, num_molecules)
+            if self.oscillator_head is not None:
+                out[:, list(self.oscillator_indices)] = self.oscillator_head(per_atom, node_batch, num_molecules)
+            return out * self.target_std + self.target_mean
+        scalars = embedding["node_embedding"][:, 0, :].float()
         counts = torch.bincount(node_batch, minlength=num_molecules).clamp_min(1).unsqueeze(1).to(scalars.dtype)
 
         def pool(per_atom):
@@ -145,6 +211,44 @@ class UMAExcitedState(nn.Module):
         if self.oscillator_head is not None:
             out[:, list(self.oscillator_indices)] = pool(self.oscillator_head(scalars))
         return out * self.target_std + self.target_mean
+
+
+def backbone_param_groups(backbone: nn.Module, base_lr: float, weight_decay: float, layer_decay: float | None) -> list[dict]:
+    """One AdamW group, or layer-wise LR decay: top block gets base_lr, each block below x layer_decay.
+
+    Parameters outside backbone.blocks.<i> count as embeddings (depth 0) unless their name starts
+    with norm/output, which count as above the last block.
+    """
+    named = [(n, p) for n, p in backbone.named_parameters() if p.requires_grad]
+    if not layer_decay:
+        return [{"params": [p for _, p in named], "lr": base_lr, "weight_decay": weight_decay, "name": "backbone"}]
+    pattern = re.compile(r"(?:^|\.)blocks\.(\d+)\.")
+    block_ids = [int(m.group(1)) for n, _ in named if (m := pattern.search(n))]
+    if not block_ids:
+        raise ValueError("layer_lr_decay needs backbone parameters under blocks.<i>")
+    top = max(block_ids) + 2
+    by_depth: dict[int, list] = {}
+    for name, param in named:
+        match = pattern.search(name)
+        if match:
+            depth = int(match.group(1)) + 1
+        else:
+            depth = top if name.split(".")[0].startswith(("norm", "output")) else 0
+        by_depth.setdefault(depth, []).append(param)
+    return [{"params": params, "lr": base_lr * layer_decay ** (top - depth), "weight_decay": weight_decay,
+             "name": f"backbone_depth{depth}"} for depth, params in sorted(by_depth.items())]
+
+
+def average_state_dicts(states: list[dict], weights: list[float] | None = None) -> dict:
+    """Weighted average of floating tensors (a model soup); other entries are taken from the first state."""
+    weights = [1.0 / len(states)] * len(states) if weights is None else [w / sum(weights) for w in weights]
+    out = {}
+    for key, ref in states[0].items():
+        if torch.is_tensor(ref) and ref.is_floating_point():
+            out[key] = sum(w * s[key].float() for w, s in zip(weights, states)).to(ref.dtype)
+        else:
+            out[key] = ref
+    return out
 
 
 def patch_mole_split_forward() -> None:
@@ -279,23 +383,43 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
         patch_mole_split_forward()
     backbone = load_backbone(model_cfg["checkpoint_path"])
     embed_dim = int(getattr(backbone, "sphere_channels", model_cfg.get("embed_dim", 128)))
+    # A fixed head_init_seed makes runs that differ only in data order share initial weights (soup-able).
+    head_init_seed = train_cfg.get("head_init_seed")
+    if head_init_seed is not None:
+        torch.manual_seed(int(head_init_seed))
     model = UMAExcitedState(
         backbone, target_columns, target_mean, target_std,
         embed_dim=embed_dim, head_hidden=int(model_cfg.get("head_hidden", 256)),
+        readout=str(model_cfg.get("readout", "l0_mean")), readout_layers=int(model_cfg.get("readout_layers", 0)),
+        lmax=int(model_cfg.get("lmax", 2)),
     ).to(device)
+    if head_init_seed is not None:
+        torch.manual_seed(seed)
 
     head_params = [p for head in model.heads() for p in head.parameters()]
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": list(model.backbone.parameters()), "lr": float(train_cfg["backbone_lr"]),
-             "weight_decay": float(train_cfg.get("backbone_weight_decay", 0.0))},
-            {"params": head_params, "lr": float(train_cfg["head_lr"]),
-             "weight_decay": float(train_cfg.get("head_weight_decay", 1e-3))},
-        ]
+    backbone_groups = backbone_param_groups(
+        model.backbone, float(train_cfg["backbone_lr"]), float(train_cfg.get("backbone_weight_decay", 0.0)),
+        train_cfg.get("layer_lr_decay"),
     )
+    print("backbone LR groups: " + json.dumps([(g["name"], len(g["params"]), g["lr"]) for g in backbone_groups]), flush=True)
+    optimizer = torch.optim.AdamW(
+        backbone_groups
+        + [{"params": head_params, "lr": float(train_cfg["head_lr"]),
+            "weight_decay": float(train_cfg.get("head_weight_decay", 1e-3)), "name": "heads"}]
+    )
+    checkpoint_metric = str(train_cfg.get("checkpoint_metric", "val_loss"))
+    ema_decay = train_cfg.get("ema_decay")
+    ema = None
+    if ema_decay:
+        from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
+
+        ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(float(ema_decay)), use_buffers=True)
     # evaluation.checkpoint_path: score an existing checkpoint on val and test, no training.
-    eval_checkpoint = (config.get("evaluation") or {}).get("checkpoint_path")
-    epochs = 0 if eval_checkpoint else int(train_cfg["epochs"])
+    # evaluation.soup_checkpoint_paths (+ optional soup_weights): score the weight average of several.
+    eval_cfg = config.get("evaluation") or {}
+    eval_checkpoint = eval_cfg.get("checkpoint_path")
+    soup_paths = list(eval_cfg.get("soup_checkpoint_paths") or [])
+    epochs = 0 if (eval_checkpoint or soup_paths) else int(train_cfg["epochs"])
     steps_per_epoch = len(train_loader)
     sched_cfg = train_cfg.get("scheduler") or {}
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -347,6 +471,11 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
         "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,
         "wandb_run_id": getattr(wandb_run, "id", None),
         "evaluation_checkpoint_path": eval_checkpoint,
+        "soup_checkpoint_paths": soup_paths or None,
+        "checkpoint_metric": checkpoint_metric,
+        "ema_decay": ema_decay,
+        "head_init_seed": head_init_seed,
+        "backbone_lr_groups": [(g["name"], g["lr"]) for g in backbone_groups],
     }
     print(json.dumps({k: summary[k] for k in ("split_sizes", "parameters", "gpu")}), flush=True)
 
@@ -375,31 +504,37 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             scheduler.step()
+            if ema is not None:
+                ema.update_parameters(model)
             running += float(loss) * target.size(0)
             seen += target.size(0)
             if step % int(train_cfg.get("log_every_steps", 200)) == 0:
                 rate = seen / (time.perf_counter() - epoch_start)
                 print(f"epoch {epoch} step {step}/{steps_per_epoch} loss {running / seen:.5f} {rate:.0f} mol/s", flush=True)
         train_seconds = time.perf_counter() - epoch_start
-        val_metrics = evaluate(model, val_loader, target_columns, loss_cfg, device, autocast_dtype)
+        eval_model = ema.module if ema is not None else model
+        val_metrics = evaluate(eval_model, val_loader, target_columns, loss_cfg, device, autocast_dtype)
         record = {
             "epoch": epoch,
             "train_loss": running / max(seen, 1),
             "val_loss": val_metrics["loss"],
             "val_energy_eV_mae": val_metrics.get("energy_eV_mae"),
             "val_log1p_oscillator_strength_mae": val_metrics.get("log1p_oscillator_strength_mae"),
-            "lr_backbone": optimizer.param_groups[0]["lr"],
-            "lr_head": optimizer.param_groups[1]["lr"],
+            "lr_backbone": max(g["lr"] for g in optimizer.param_groups[:-1]),
+            "lr_head": optimizer.param_groups[-1]["lr"],
             "train_seconds": train_seconds,
             "epoch_seconds": time.perf_counter() - epoch_start,
             "skipped_nonfinite_batches": skipped,
         }
         history.append(record)
-        if val_metrics["loss"] < best_val:
-            best_val, best_epoch = val_metrics["loss"], epoch
+        selection_value = record.get(checkpoint_metric)
+        if selection_value is None or not math.isfinite(float(selection_value)):
+            raise ValueError(f"checkpoint_metric {checkpoint_metric!r} missing or non-finite; record keys: {sorted(record)}")
+        if selection_value < best_val:
+            best_val, best_epoch = float(selection_value), epoch
             torch.save(
                 {
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": eval_model.state_dict(),
                     "epoch": epoch,
                     "val_metrics": val_metrics,
                     "config": config,
@@ -411,7 +546,7 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
         if wandb_run is not None:
             wandb_run.log({**record, **{f"val_{k}": v for k, v in val_metrics.items()}}, step=epoch)
         write_history(metrics_path, history)
-        summary.update(updated_at=_utc_now(), latest_epoch=epoch, best_epoch=best_epoch, best_val_loss=best_val,
+        summary.update(updated_at=_utc_now(), latest_epoch=epoch, best_epoch=best_epoch, best_checkpoint_metric_value=best_val,
                        latest_val_metrics=val_metrics)
         summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         elapsed_hours = (time.perf_counter() - started) / 3600
@@ -420,10 +555,15 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             print(summary["stop_reason"], flush=True)
             break
 
-    best = torch.load(eval_checkpoint or checkpoint_path, map_location=device, weights_only=False)
-    model.load_state_dict(best["model_state_dict"])
-    if eval_checkpoint:
-        best_epoch = best.get("epoch")
+    if soup_paths:
+        states = [torch.load(p, map_location="cpu", weights_only=False)["model_state_dict"] for p in soup_paths]
+        model.load_state_dict(average_state_dicts(states, eval_cfg.get("soup_weights")))
+        best_epoch = None
+    else:
+        best = torch.load(eval_checkpoint or checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(best["model_state_dict"])
+        if eval_checkpoint:
+            best_epoch = best.get("epoch")
     keys = [str(k) for k in arrays["molecule_key"]]
     predictions_path = summary_path.with_name(summary_path.name.replace(".summary.json", ".test_predictions.csv"))
     val_predictions_path = summary_path.with_name(summary_path.name.replace(".summary.json", ".val_predictions.csv"))
