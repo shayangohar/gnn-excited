@@ -92,6 +92,41 @@ class PackedMolecules(Dataset):
         return molecule_data(self.numbers[start:end], self.positions[start:end]), torch.from_numpy(self.targets[m]), m
 
 
+class PoolMolecules(Dataset):
+    """Unlabeled packed pool (numbers, positions, atom_offsets) for teacher inference."""
+
+    def __init__(self, pool: dict[str, np.ndarray]):
+        self.numbers, self.positions, self.offsets = pool["numbers"], pool["positions"], pool["atom_offsets"]
+
+    def __len__(self) -> int:
+        return int(self.offsets.size - 1)
+
+    def __getitem__(self, i: int):
+        start, end = int(self.offsets[i]), int(self.offsets[i + 1])
+        return molecule_data(self.numbers[start:end], self.positions[start:end]), torch.zeros(1), i
+
+
+@torch.no_grad()
+def predict_pool(model, pool_path: str, out_csv: str, target_columns, device, batch_size: int, num_workers: int) -> int:
+    """Write molecule_key + prediction_<column> for every pool molecule, in pool order."""
+    pool = dict(np.load(pool_path, allow_pickle=False))
+    keys = [str(k) for k in pool["molecule_key"]]
+    loader = DataLoader(PoolMolecules(pool), batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                        collate_fn=collate, persistent_workers=False)
+    model.eval()
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with open(out_csv, "w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["molecule_key", *[f"prediction_{c}" for c in target_columns]])
+        for batch, _, rows in loader:
+            pred = model(batch.to(device)).float().cpu().numpy()
+            for row, values in zip(rows.tolist(), pred):
+                writer.writerow([keys[row], *(f"{v:.6f}" for v in values)])
+                written += 1
+    return written
+
+
 def collate(items):
     from fairchem.core.datasets.atomic_data import atomicdata_list_to_batch
 
@@ -395,6 +430,23 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     ).to(device)
     if head_init_seed is not None:
         torch.manual_seed(seed)
+
+    # inference: {pool_path, checkpoint_paths, out_csvs}: teacher predictions on an unlabeled pool, then exit.
+    inference_cfg = config.get("inference") or {}
+    if inference_cfg:
+        paths, outs = list(inference_cfg["checkpoint_paths"]), list(inference_cfg["out_csvs"])
+        if len(paths) != len(outs):
+            raise ValueError("inference.checkpoint_paths and inference.out_csvs must pair up")
+        results = {}
+        for path, out in zip(paths, outs):
+            started = time.perf_counter()
+            state = torch.load(path, map_location=device, weights_only=False)["model_state_dict"]
+            model.load_state_dict(state)
+            n = predict_pool(model, inference_cfg["pool_path"], out, target_columns, device,
+                             int(inference_cfg.get("batch_size", train_cfg["batch_size"])), int(train_cfg.get("num_workers", 8)))
+            results[path] = {"out_csv": out, "molecules": n, "seconds": time.perf_counter() - started}
+            print(f"INFERENCE {path} -> {out}: {n} molecules in {results[path]['seconds']:.0f}s", flush=True)
+        return {"status": "inference_completed", "results": results}
 
     head_params = [p for head in model.heads() for p in head.parameters()]
     backbone_groups = backbone_param_groups(

@@ -1,0 +1,75 @@
+# TASK-257 B2 stage B: GW finetune of the distilled student, seed 18 (compare PQC-e20 0.05812 +/- 0.00016).
+model:
+  type: visnet
+  hidden_channels: 216
+  num_layers: 3
+  num_rbf: 25
+  cutoff: 5.0
+  max_num_neighbors: 100
+  reduce_op: mean
+dataset:
+  type: qm9gwbse
+  hdf5_path: data/processed/qm9gwbse/qm9gwbse.h5
+  manifest_path: data/processed/qm9gwbse/manifest.csv
+  split_path: data/processed/qm9gwbse/splits.csv
+  split_column: random_split
+  local_copy: true
+  split_seed: 17
+targets:
+  columns:
+  - S1_eV
+  - log1p_S1_f
+  - S2_eV
+  - log1p_S2_f
+  - S3_eV
+  - log1p_S3_f
+  - S4_eV
+  - log1p_S4_f
+  - S5_eV
+  - log1p_S5_f
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 1.0
+  gap_weight: 0.1
+  ordering_weight: 0.01
+transfer:
+  checkpoint_path: checkpoints/distill_student_pretrain.pt
+  mode: encoder_energy_finetune
+training:
+  device: cuda
+  seed: 18
+  epochs: 50
+  batch_size: 16
+  learning_rate: 0.0003
+  weight_decay: 0.001
+  max_grad_norm: 1.0
+  dataloader:
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 4
+  scheduler:
+    type: warmup_cosine
+    warmup_epochs: 5
+    start_factor: 0.0033333333333333335
+    min_lr: 1.0e-05
+  checkpoint_path: checkpoints/distill_enc_qm9gwbse_finetune_s18.pt
+  metrics_csv_path: runs/distill_enc_qm9gwbse_finetune_s18.metrics.csv
+  summary_json_path: runs/distill_enc_qm9gwbse_finetune_s18.summary.json
+  checkpoint_metric: val_energy_eV_mae
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: distill_enc_qm9gwbse_finetune_s18
+  group: distillation
+  tags:
+  - QM9GWBSE
+  - S1-S5
+  - ViSNet
+  - qsGW-BSE
+  - PubChemQC-encoder
+evaluation:
+  predictions_csv_path: runs/ensemble_preds/distill_s18.test_predictions.csv
+  val_predictions_csv_path: runs/ensemble_preds/distill_s18.val_predictions.csv

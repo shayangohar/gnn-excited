@@ -1,0 +1,86 @@
+# TASK-257: wave B families blended with production members; weights on val.
+grid_step: 0.05
+members:
+  uma_rich_s17:
+    val: runs/uma_qm9gwbse_rich_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s17.test_predictions.csv
+  uma_richind_s17:
+    val: runs/uma_qm9gwbse_richind_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s17.test_predictions.csv
+  pqc_e20_s17:
+    val: runs/ensemble_preds/pqc_e20_s17.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s17.test_predictions.csv
+  pqc_e20_rich_s17:
+    val: runs/ensemble_preds/pqc_e20_rich_s17.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_rich_s17.test_predictions.csv
+  distill_s17:
+    val: runs/ensemble_preds/distill_s17.val_predictions.csv
+    test: runs/ensemble_preds/distill_s17.test_predictions.csv
+  uma_rich_s18:
+    val: runs/uma_qm9gwbse_rich_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s18.test_predictions.csv
+  uma_richind_s18:
+    val: runs/uma_qm9gwbse_richind_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s18.test_predictions.csv
+  pqc_e20_s18:
+    val: runs/ensemble_preds/pqc_e20_s18.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s18.test_predictions.csv
+  pqc_e20_rich_s18:
+    val: runs/ensemble_preds/pqc_e20_rich_s18.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_rich_s18.test_predictions.csv
+  distill_s18:
+    val: runs/ensemble_preds/distill_s18.val_predictions.csv
+    test: runs/ensemble_preds/distill_s18.test_predictions.csv
+  uma_rich_s19:
+    val: runs/uma_qm9gwbse_rich_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_rich_s19.test_predictions.csv
+  uma_richind_s19:
+    val: runs/uma_qm9gwbse_richind_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s19.test_predictions.csv
+  pqc_e20_s19:
+    val: runs/ensemble_preds/pqc_e20_s19.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_s19.test_predictions.csv
+  pqc_e20_rich_s19:
+    val: runs/ensemble_preds/pqc_e20_rich_s19.val_predictions.csv
+    test: runs/ensemble_preds/pqc_e20_rich_s19.test_predictions.csv
+  distill_s19:
+    val: runs/ensemble_preds/distill_s19.val_predictions.csv
+    test: runs/ensemble_preds/distill_s19.test_predictions.csv
+groups:
+  uma_rich:
+  - uma_rich_s17
+  - uma_rich_s18
+  - uma_rich_s19
+  uma_richind:
+  - uma_richind_s17
+  - uma_richind_s18
+  - uma_richind_s19
+  pqc_e20:
+  - pqc_e20_s17
+  - pqc_e20_s18
+  - pqc_e20_s19
+  pqc_e20_rich:
+  - pqc_e20_rich_s17
+  - pqc_e20_rich_s18
+  - pqc_e20_rich_s19
+  distill:
+  - distill_s17
+  - distill_s18
+  - distill_s19
+blends:
+- - uma_rich
+  - pqc_e20
+- - uma_richind
+  - pqc_e20
+- - uma_rich
+  - pqc_e20_rich
+- - uma_richind
+  - pqc_e20_rich
+- - uma_richind
+  - distill
+- - uma_richind
+  - pqc_e20_rich
+  - distill
+- - uma_rich
+  - uma_richind
+  - pqc_e20

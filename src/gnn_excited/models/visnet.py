@@ -53,6 +53,25 @@ if nn is not None:
                 scalar, vector = layer(scalar, vector)
             return scalar + vector.sum() * 0
 
+    class PooledResidualHead(nn.Module):
+        """Per-atom MLP, mean+std pooling per molecule, zero-initialized output layer."""
+
+        def __init__(self, in_dim: int, hidden: int, out_dim: int):
+            super().__init__()
+            self.trunk = nn.Sequential(
+                nn.LayerNorm(in_dim), nn.Linear(in_dim, hidden), nn.SiLU(), nn.Linear(hidden, hidden), nn.SiLU()
+            )
+            self.out = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.SiLU(), nn.Linear(hidden, out_dim))
+            nn.init.zeros_(self.out[-1].weight)
+            nn.init.zeros_(self.out[-1].bias)
+
+        def forward(self, per_atom, batch, num_molecules: int):
+            h = self.trunk(per_atom)
+            mean = scatter(h, batch, dim=0, dim_size=num_molecules, reduce="mean")
+            second = scatter(h * h, batch, dim=0, dim_size=num_molecules, reduce="mean")
+            std = (second - mean * mean).clamp_min(0.0).add(1e-6).sqrt()
+            return self.out(torch.cat([mean, std], dim=-1))
+
     class ViSNetOnePass(nn.Module):
         """Evaluate one shared ViSNet encoder, then split energy/oscillator heads."""
 
@@ -77,6 +96,7 @@ if nn is not None:
                 encoder_kwargs["num_layers"] = encoder_kwargs.pop("layers")
             encoder_kwargs["hidden_channels"] = self.hidden_channels
             self.reduce_op = str(encoder_kwargs.pop("reduce_op", "mean"))
+            self.rich_readout = bool(encoder_kwargs.pop("rich_readout", False))
             self.encoder = ViSNet(**encoder_kwargs).representation_model
             self.energy_head = MultiTargetEquivariantScalar(
                 self.hidden_channels, len(self.energy_indices)
@@ -84,6 +104,15 @@ if nn is not None:
             self.oscillator_head = MultiTargetEquivariantScalar(
                 self.hidden_channels, len(self.oscillator_indices)
             )
+            if self.rich_readout:
+                # TASK-257 (DOC-248 L3 for ViSNet): zero-init residual heads on [scalar, |vector|]
+                # with mean+std pooling, so transferred energy heads start unchanged.
+                self.rich_energy_head = PooledResidualHead(
+                    2 * self.hidden_channels, self.hidden_channels, len(self.energy_indices)
+                )
+                self.rich_oscillator_head = PooledResidualHead(
+                    2 * self.hidden_channels, self.hidden_channels, len(self.oscillator_indices)
+                )
             if self.denoising:
                 self.denoise_head = nn.Linear(self.hidden_channels, 1)
 
@@ -99,9 +128,17 @@ if nn is not None:
             if batch is None:
                 batch = torch.zeros(z.size(0), dtype=torch.long, device=z.device)
             scalar, vector = self.encoder(z, pos, batch)
+            rich = None
+            if self.rich_readout:
+                rich = torch.cat([scalar, vector.norm(dim=1)], dim=-1)
             if not self.energy_indices or not self.oscillator_indices:
-                head = self.energy_head if self.energy_indices else self.oscillator_head
-                return scatter(head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
+                use_energy = bool(self.energy_indices)
+                head = self.energy_head if use_energy else self.oscillator_head
+                out = scatter(head(scalar, vector), batch, dim=0, reduce=self.reduce_op)
+                if rich is not None:
+                    residual = self.rich_energy_head if use_energy else self.rich_oscillator_head
+                    out = out + residual(rich, batch, out.size(0))
+                return out
             energy = scatter(
                 self.energy_head(scalar, vector), batch, dim=0, reduce=self.reduce_op
             )
@@ -111,6 +148,9 @@ if nn is not None:
                 dim=0,
                 reduce=self.reduce_op,
             )
+            if rich is not None:
+                energy = energy + self.rich_energy_head(rich, batch, energy.size(0))
+                oscillator = oscillator + self.rich_oscillator_head(rich, batch, oscillator.size(0))
             output = scalar.new_empty((energy.size(0), len(self.target_columns)))
             output[:, list(self.energy_indices)] = energy
             output[:, list(self.oscillator_indices)] = oscillator
