@@ -11,7 +11,7 @@ import pytest
 np = pytest.importorskip("numpy")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from build_external_testsets import connectivity_key, read_xyz, to_ev, visnetgwbse_split  # noqa: E402
+from build_external_testsets import connectivity_key, read_xyz, set_is_hartree, visnetgwbse_split  # noqa: E402
 from head_to_head_report import blend_sorted, paired_bootstrap  # noqa: E402
 
 
@@ -37,9 +37,10 @@ def test_read_xyz_plain_and_extended(tmp_path):
     assert read_xyz(plain)[0] == ["H", "H"]
 
 
-def test_to_ev_detects_hartree():
-    assert to_ev(np.array([0.15, 0.2]))[0] == pytest.approx(0.15 * 27.211386245988)
-    assert to_ev(np.array([5.43]))[0] == pytest.approx(5.43)
+def test_set_units_decided_per_set():
+    assert set_is_hartree([np.array([0.15, 0.2, 0.22]), np.array([0.18, 0.19])])
+    # the QM9 set is eV but contains one S1 below 2 eV
+    assert not set_is_hartree([np.array([5.43]), np.array([1.57]), np.array([6.1])])
 
 
 def test_connectivity_key_ignores_small_geometry_changes():

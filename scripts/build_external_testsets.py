@@ -11,7 +11,9 @@ against stored test predictions. Writes to --out-dir:
   labels.csv             molecule_key, set, natoms, heavy_atoms, elements, S1..S5_eV (blank if
                          absent), qm9_overlap_ids (QM9GWBSE ids with the same connectivity graph)
                          and the split of those ids in our split and in Baum et al.'s split
-  visnetgwbse_split.csv  molecule_key (QM9 id), split: Baum et al.'s seeded split (data/qm9gwbse.py)
+  visnetgwbse_split.csv  molecule_key (QM9 id), split: the seeded split their released code builds
+                         (data/qm9gwbse.py). Their released QM9 test molecules fall in it at chance
+                         rates, so it is probably not the split behind the paper (TASK-271).
 
 Overlap uses an all-single-bond connectivity graph (RDKit DetermineConnectivity) with explicit
 hydrogens, so different optimizations of the same molecule still match.
@@ -50,10 +52,10 @@ def read_xyz(path: str | Path) -> tuple[list[str], np.ndarray]:
     return [r[0] for r in rows], np.array([[float(v) for v in r[1:4]] for r in rows], dtype=np.float64)
 
 
-def to_ev(values: np.ndarray) -> np.ndarray:
-    """Excitation energies in eV; values below 2 are Hartree (2 Ha = 54 eV, far above any S1-S5)."""
-    values = np.atleast_1d(np.asarray(values, dtype=np.float64))
-    return values * HARTREE_TO_EV if values.max() < 2.0 else values
+def set_is_hartree(label_arrays: list[np.ndarray]) -> bool:
+    """A set is in Hartree if its median label is below 2 (2 Ha = 54 eV). Decided per set, not per
+    file: the QM9 set is in eV but holds a molecule with S1 = 1.57 eV (mol_271)."""
+    return bool(np.median(np.concatenate(label_arrays)) < 2.0)
 
 
 def connectivity_key(numbers, positions) -> str | None:
@@ -110,22 +112,23 @@ def main() -> None:
     records = []  # (molecule_key, set, numbers, positions, energies[5] with NaN)
     report = {"sets": {}}
     for set_dir in sorted(p for p in Path(args.testsets_dir).iterdir() if p.is_dir()):
-        kept, missing, units = 0, 0, Counter()
+        found, missing = [], 0
         for xyz in sorted((set_dir / "XYZ").glob("*.xyz")):
             label_path = set_dir / "E_exc_SS" / f"{xyz.stem}.dat"
-            if not label_path.exists():
+            if label_path.exists():
+                found.append((xyz, np.loadtxt(label_path, ndmin=1)))
+            else:
                 missing += 1
-                continue
-            raw = np.loadtxt(label_path, ndmin=1)
-            units["hartree" if raw.max() < 2.0 else "eV"] += 1
+        hartree = set_is_hartree([raw for _, raw in found])
+        for xyz, raw in found:
             energies = np.full(5, np.nan)
-            values = to_ev(raw)[:5]
+            values = (raw * HARTREE_TO_EV if hartree else raw)[:5]
             energies[:values.size] = values
             symbols, positions = read_xyz(xyz)
             numbers = np.array([table.GetAtomicNumber(s) for s in symbols], dtype=np.uint8)
             records.append((f"{set_dir.name}:{xyz.stem}", set_dir.name, numbers, positions, energies))
-            kept += 1
-        report["sets"][set_dir.name] = {"molecules": kept, "missing_labels": missing, "label_units": dict(units)}
+        report["sets"][set_dir.name] = {"molecules": len(found), "missing_labels": missing,
+                                        "label_unit": "hartree" if hartree else "eV"}
     test_rows = np.flatnonzero(q_split == "test")
     for row in np.sort(np.random.default_rng(0).choice(test_rows, size=min(args.n_control, test_rows.size), replace=False)):
         a, b = int(q_offsets[row]), int(q_offsets[row + 1])
