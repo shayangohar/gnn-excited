@@ -57,6 +57,12 @@ def batch_mae(
                 osc_maes.append(osc_mae)
     if energy_maes:
         metrics['energy_eV_mae'] = sum(energy_maes) / len(energy_maes)
+    singlet = [metrics[f'{c}_mae'] for c in target_columns if c.endswith('_eV') and c.upper().startswith('S')]
+    triplet = [metrics[f'{c}_mae'] for c in target_columns if c.endswith('_eV') and c.upper().startswith('T')]
+    if singlet and triplet:
+        # Joint S+T targets: energy_eV_mae mixes manifolds, so also report each (S-agg = singlet).
+        metrics['singlet_energy_eV_mae'] = sum(singlet) / len(singlet)
+        metrics['triplet_energy_eV_mae'] = sum(triplet) / len(triplet)
     if log_osc_maes:
         metrics['log1p_oscillator_strength_mae'] = sum(log_osc_maes) / len(log_osc_maes)
     if osc_maes:

@@ -571,6 +571,7 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             "train_loss": running / max(seen, 1),
             "val_loss": val_metrics["loss"],
             "val_energy_eV_mae": val_metrics.get("energy_eV_mae"),
+            **{f"val_{k}": val_metrics[k] for k in ("singlet_energy_eV_mae", "triplet_energy_eV_mae") if k in val_metrics},
             "val_log1p_oscillator_strength_mae": val_metrics.get("log1p_oscillator_strength_mae"),
             "lr_backbone": max(g["lr"] for g in optimizer.param_groups[:-1]),
             "lr_head": optimizer.param_groups[-1]["lr"],

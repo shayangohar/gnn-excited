@@ -1,0 +1,68 @@
+# TASK-262: wave C families vs production (KNOW-261); weights on val.
+grid_step: 0.05
+members:
+  uma_richind_s17:
+    val: runs/uma_qm9gwbse_richind_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s17.test_predictions.csv
+  uma_richind_st_s17:
+    val: runs/uma_qm9gwbse_richind_st_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s17.test_predictions.csv
+  distill_s17:
+    val: runs/ensemble_preds/distill_s17.val_predictions.csv
+    test: runs/ensemble_preds/distill_s17.test_predictions.csv
+  distill_joint_s17:
+    val: runs/ensemble_preds/distill_joint_s17.val_predictions.csv
+    test: runs/ensemble_preds/distill_joint_s17.test_predictions.csv
+  uma_richind_s18:
+    val: runs/uma_qm9gwbse_richind_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s18.test_predictions.csv
+  uma_richind_st_s18:
+    val: runs/uma_qm9gwbse_richind_st_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s18.test_predictions.csv
+  distill_s18:
+    val: runs/ensemble_preds/distill_s18.val_predictions.csv
+    test: runs/ensemble_preds/distill_s18.test_predictions.csv
+  distill_joint_s18:
+    val: runs/ensemble_preds/distill_joint_s18.val_predictions.csv
+    test: runs/ensemble_preds/distill_joint_s18.test_predictions.csv
+  uma_richind_s19:
+    val: runs/uma_qm9gwbse_richind_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s19.test_predictions.csv
+  uma_richind_st_s19:
+    val: runs/uma_qm9gwbse_richind_st_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s19.test_predictions.csv
+  distill_s19:
+    val: runs/ensemble_preds/distill_s19.val_predictions.csv
+    test: runs/ensemble_preds/distill_s19.test_predictions.csv
+  distill_joint_s19:
+    val: runs/ensemble_preds/distill_joint_s19.val_predictions.csv
+    test: runs/ensemble_preds/distill_joint_s19.test_predictions.csv
+groups:
+  uma_richind:
+  - uma_richind_s17
+  - uma_richind_s18
+  - uma_richind_s19
+  uma_richind_st:
+  - uma_richind_st_s17
+  - uma_richind_st_s18
+  - uma_richind_st_s19
+  distill:
+  - distill_s17
+  - distill_s18
+  - distill_s19
+  distill_joint:
+  - distill_joint_s17
+  - distill_joint_s18
+  - distill_joint_s19
+blends:
+- - uma_richind
+  - distill
+- - uma_richind
+  - distill_joint
+- - uma_richind_st
+  - distill
+- - uma_richind_st
+  - distill_joint
+- - uma_richind
+  - uma_richind_st
+  - distill_joint
