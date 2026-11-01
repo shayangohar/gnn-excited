@@ -26,14 +26,14 @@ KEY=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$LIST")
 [ -n "$KEY" ] || { echo "no key for task $SLURM_ARRAY_TASK_ID"; exit 1; }
 OUT=data/processed/orca_pilot/out
 mkdir -p "$OUT"
-WORK=/tmp/$USER/orca_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
-mkdir -p "$WORK"; trap 'rm -rf "$WORK"' EXIT
-cp "data/processed/orca_pilot/xyz/$KEY.xyz" "$WORK/mol.xyz"
-cp scripts/orca_steom_dlpno.inp "$WORK/mol.inp"
+SCR=/tmp/$USER/orca_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}
+mkdir -p "$SCR"; trap 'rm -rf "$SCR"' EXIT
+cp "data/processed/orca_pilot/xyz/$KEY.xyz" "$SCR/mol.xyz"
+cp scripts/orca_steom_dlpno.inp "$SCR/mol.inp"
 started=$(date +%s)
-( cd "$WORK" && "$ORCA_DIR/orca" mol.inp > mol.out 2>&1 ) || status=$?
+( cd "$SCR" && "$ORCA_DIR/orca" mol.inp > mol.out 2>&1 ) || status=$?
 elapsed=$(( $(date +%s) - started ))
-cp "$WORK/mol.out" "$OUT/$KEY.out"
+cp "$SCR/mol.out" "$OUT/$KEY.out"
 echo "{\"key\": \"$KEY\", \"seconds\": $elapsed, \"exit\": ${status:-0}, \"node\": \"$(hostname)\", \"cpus\": $SLURM_CPUS_PER_TASK, \"orca\": \"$(basename "$ORCA_DIR")\"}" > "$OUT/$KEY.timing.json"
 echo "ORCA $KEY exit ${status:-0} in ${elapsed}s"
 exit ${status:-0}

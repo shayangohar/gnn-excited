@@ -19,9 +19,10 @@
 set -euo pipefail
 cd /projects/bhzu/gnn-excited
 ORCA_DIR=${ORCA_DIR:-$HOME/software/orca_6_1_1_linux_x86-64_shared_openmpi418}
-WORK=/tmp/$USER/orca_smoke_$SLURM_JOB_ID
-mkdir -p "$WORK" runs/orca_pilot; trap 'rm -rf "$WORK"' EXIT
-cat > "$WORK/mol.xyz" <<'XYZ'
+# SCR, not WORK: a Delta default module exports $WORK and `module purge` below unsets it.
+SCR=/tmp/$USER/orca_smoke_$SLURM_JOB_ID
+mkdir -p "$SCR" runs/orca_pilot; trap 'rm -rf "$SCR"' EXIT
+cat > "$SCR/mol.xyz" <<'XYZ'
 4
 formaldehyde (C=O 1.205, C-H 1.101 A, HCH 116.5 deg)
 C   0.000000   0.000000   0.000000
@@ -29,17 +30,17 @@ O   0.000000   0.000000   1.205000
 H   0.000000   0.936200  -0.579300
 H   0.000000  -0.936200  -0.579300
 XYZ
-cp scripts/orca_steom_dlpno.inp "$WORK/mol.inp"
+cp scripts/orca_steom_dlpno.inp "$SCR/mol.inp"
 started=$(date +%s)
-( cd "$WORK" && "$ORCA_DIR/orca" mol.inp > mol.out 2>&1 ) || status=$?
+( cd "$SCR" && "$ORCA_DIR/orca" mol.inp > mol.out 2>&1 ) || status=$?
 echo "ORCA exit ${status:-0} in $(( $(date +%s) - started ))s"
-cp "$WORK/mol.out" "runs/orca_pilot/orca_smoke.$SLURM_JOB_ID.orca.out"
-grep -m1 "Program Version" "$WORK/mol.out" || true
-[ "${status:-0}" -eq 0 ] || { tail -30 "$WORK/mol.out"; exit 1; }
+cp "$SCR/mol.out" "runs/orca_pilot/orca_smoke.$SLURM_JOB_ID.orca.out"
+grep -m1 "Program Version" "$SCR/mol.out" || true
+[ "${status:-0}" -eq 0 ] || { tail -30 "$SCR/mol.out"; exit 1; }
 source /etc/profile.d/modules.sh
 module purge
 source envs/gnn-excited-delta/bin/activate
-python - "$WORK/mol.out" <<'PY'
+python - "$SCR/mol.out" <<'PY'
 import sys
 sys.path.insert(0, "scripts")
 from parse_orca_pilot import parse_steom
