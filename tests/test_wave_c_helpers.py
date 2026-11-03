@@ -12,7 +12,7 @@ pytest.importorskip("h5py")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from build_joint_distill_dataset import qm9_entries  # noqa: E402
-from parse_orca_pilot import parse_steom  # noqa: E402
+from parse_orca_pilot import failure_cause, is_reliable, parse_steom, parse_steom_roots  # noqa: E402
 
 ORCA_SNIPPET = """
  CIS-type guess
@@ -32,6 +32,40 @@ def test_parse_steom_takes_the_block_after_the_steom_header():
     assert parse_steom(ORCA_SNIPPET) == [5.633, 6.259, 6.558, 6.803, 7.129]
     assert parse_steom("no results here") is None
     assert parse_steom(ORCA_SNIPPET, nroots=6) is None
+    assert not is_reliable(parse_steom_roots(ORCA_SNIPPET))  # no active character printed
+
+
+# Shape of a real ORCA 6.1.1 STEOM block (QM9 581): duplicated roots that ORCA itself removes,
+# and roots below 98% active character.
+ORCA_DUPLICATES = """
+STEOM-CCSD RESULTS (SINGLETS)
+IROOT=  1:  0.139512 au     3.796 eV   30619.4 cm**-1 <S**2> =   0.000000
+Percentage Active Character     97.90
+IROOT=  2:  0.139722 au     3.802 eV   30665.4 cm**-1 <S**2> =   0.000000
+Percentage Active Character     97.93
+IROOT=  3:  0.283976 au     7.727 eV   62325.6 cm**-1 <S**2> =   0.000000
+Percentage Active Character     99.18
+IROOT=  4:  0.284020 au     7.729 eV   62335.3 cm**-1 <S**2> =   0.000000
+Percentage Active Character     99.16
+IROOT=  5:  0.306685 au     8.345 eV   67309.6 cm**-1 <S**2> =   0.000000
+Percentage Active Character     86.93
+PAIRWISE REDUNDANCY FOUND (L1=1.999979E+00,L2=2.075650E-05) AND REMOVED FOR IROOT=1 and IROOT=2!
+PAIRWISE REDUNDANCY FOUND (L1=1.998889E+00,L2=1.111016E-03) AND REMOVED FOR IROOT=3 and IROOT=4!
+IROOT=  1:     3.796    1.099490    1.180526    0.286923    4.164862
+"""
+
+
+def test_parse_steom_drops_orca_duplicates_and_flags_low_active_character():
+    roots = parse_steom_roots(ORCA_DUPLICATES)
+    assert [r["redundant"] for r in roots] == [False, True, False, True, False]
+    assert [r["active"] for r in roots] == [97.90, 97.93, 99.18, 99.16, 86.93]
+    assert parse_steom(ORCA_DUPLICATES, nroots=3) == [3.796, 7.727, 8.345]
+    assert parse_steom(ORCA_DUPLICATES) is None
+    assert not is_reliable(roots, nroots=3)
+    clean = ORCA_DUPLICATES.replace("97.90", "98.50").replace("86.93", "99.00")
+    assert is_reliable(parse_steom_roots(clean), nroots=3)
+    assert failure_cause("... Solution of the IP-EOM-DLPNO-CCSD equations failed ...") == "IP-EOM"
+    assert failure_cause("partial output") == "incomplete (killed or timed out)"
 
 
 def test_qm9_entries_repeat_train_and_keep_val_test_once():

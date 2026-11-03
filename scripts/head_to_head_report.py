@@ -17,6 +17,9 @@ them). Differences are ours minus theirs with paired-bootstrap 95% intervals (ne
              molecules in its test part; otherwise the rebuilt split is not the paper's split.
 
 The QM9GWBSE control molecules check that pool inference reproduces the stored test predictions.
+On the external sets the production blend is guarded: a family whose energies for a molecule are
+non-finite or outside VALID_EV is dropped for that molecule (count in *_guarded_molecules); the
+single-family rows stay unguarded.
 """
 from __future__ import annotations
 
@@ -29,6 +32,7 @@ import numpy as np
 
 ENERGY = [f"S{i}_eV" for i in range(1, 6)]
 SEEDS = (17, 18, 19)
+VALID_EV = (0.0, 30.0)  # outside this a member has failed (OE62L:SEJDAM, a 0.75 A H-H contact, gives 1e9 eV)
 
 
 def read_csv_columns(path: str | Path, columns: list[str]) -> dict[str, np.ndarray]:
@@ -42,6 +46,19 @@ def blend_sorted(groups: list[list[dict[str, np.ndarray]]], weights: list[float]
     """Weighted blend of seed-averaged groups, each molecule's energies sorted ascending."""
     pred = sum(w * np.mean([np.stack([m[k] for k in keys]) for m in group], axis=0) for w, group in zip(weights, groups))
     return np.sort(pred, axis=1)
+
+
+def guarded_blend(groups: list[list[dict[str, np.ndarray]]], weights: list[float], keys: list[str],
+                  valid_ev: tuple[float, float] = VALID_EV) -> tuple[np.ndarray, int]:
+    """blend_sorted, but a group whose seed-mean energy for a molecule is non-finite or outside
+    valid_ev is dropped for that molecule and the other weights renormalised. Returns the blend
+    and the number of molecules where a group was dropped (NaN rows if every group was)."""
+    means = np.stack([np.mean([np.stack([m[k] for k in keys]) for m in group], axis=0) for group in groups])
+    ok = np.all(np.isfinite(means) & (means >= valid_ev[0]) & (means <= valid_ev[1]), axis=2)  # (group, molecule)
+    w = np.asarray(weights, dtype=float)[:, None] * ok
+    total = w.sum(axis=0)
+    pred = np.einsum("gm,gms->ms", w / np.where(total > 0, total, np.nan), np.where(ok[..., None], means, 0.0))
+    return np.sort(pred, axis=1), int((~ok).any(axis=0).sum())
 
 
 def paired_bootstrap(err_a: np.ndarray, err_b: np.ndarray, n_boot: int = 2000, seed: int = 0) -> list[float]:
@@ -138,12 +155,13 @@ def main() -> None:
                 continue
             keys = [r["molecule_key"] for r in keep]
             target = np.array([float(r["S1_eV"]) for r in keep])
-            production = blend_sorted([ext_uma, ext_vis], args.weights, keys)
+            production, guarded = guarded_blend([ext_uma, ext_vis], args.weights, keys)
             preds = {"ours_production": production[:, 0],
                      "ours_uma_only": blend_sorted([ext_uma], [1.0], keys)[:, 0],
                      "ours_visnet_only": blend_sorted([ext_vis], [1.0], keys)[:, 0],
                      **{f"theirs_{n}": np.array([theirs_ext[n][k][0] for k in keys]) for n in finetuned}}
             row = compare(target, preds, "ours_production", primary, their_names)
+            row["ours_production_guarded_molecules"] = guarded
             full = np.array([[float(r[c]) if r[c] else np.nan for c in ENERGY] for r in keep])
             if not np.isnan(full).any():
                 row["ours_production_S_agg_eV"] = float(np.abs(production - full).mean())

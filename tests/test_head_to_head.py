@@ -12,7 +12,7 @@ np = pytest.importorskip("numpy")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from build_external_testsets import connectivity_key, read_xyz, set_is_hartree, visnetgwbse_split  # noqa: E402
-from head_to_head_report import blend_sorted, paired_bootstrap  # noqa: E402
+from head_to_head_report import blend_sorted, guarded_blend, paired_bootstrap  # noqa: E402
 
 
 def test_visnetgwbse_split_matches_their_global_seed_shuffle():
@@ -74,3 +74,15 @@ def test_blend_sorted_and_bootstrap():
     assert out[0].tolist() == [1.0, 2.0, 2.0, 4.0, 5.0]
     lo, hi = paired_bootstrap(np.full(50, 0.1), np.full(50, 0.3))
     assert lo == pytest.approx(-0.2) and hi == pytest.approx(-0.2)
+
+
+def test_guarded_blend_drops_a_failed_family_per_molecule():
+    good = {"a": np.array([3.0, 4.0, 5.0, 6.0, 7.0]), "b": np.array([3.0, 4.0, 5.0, 6.0, 7.0])}
+    bad = {"a": np.array([1.0, 2.0, 3.0, 4.0, 5.0]), "b": np.array([1e9, 2.0, 3.0, 4.0, 5.0])}
+    out, guarded = guarded_blend([[good], [bad]], [0.6, 0.4], ["a", "b"])
+    assert guarded == 1
+    assert out[0].tolist() == pytest.approx([0.6 * 3 + 0.4 * 1, 0.6 * 4 + 0.4 * 2, 0.6 * 5 + 0.4 * 3,
+                                             0.6 * 6 + 0.4 * 4, 0.6 * 7 + 0.4 * 5])
+    assert out[1].tolist() == [3.0, 4.0, 5.0, 6.0, 7.0]  # "b" falls back to the good family alone
+    _, none = guarded_blend([[bad]], [1.0], ["b"])
+    assert none == 1
