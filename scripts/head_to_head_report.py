@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Head-to-head S1 report: our production blend vs Baum et al. ViSNetGWBSE (TASK-271, DOC-248 L13).
 
-Production (KNOW-261) is w_uma * mean(UMA richind x3) + w_visnet * mean(distilled ViSNet x3), with
-each molecule's five energies sorted. Their checkpoints predict S1 only, so the comparison is S1.
+Production (promoted 2026-11-03) is 0.45 * mean(UMA richind x3) + 0.20 * mean(UMA richind S+T x3)
++ 0.35 * mean(distilled ViSNet x3), with each molecule's five singlet energies sorted. Their
+checkpoints predict S1 only, so the comparison is S1.
 
 Their side is reported two ways: the paper's default checkpoint (--their-primary, chosen before
 seeing any result) and, per subset, their best checkpoint on that subset ("oracle", optimistic for
@@ -89,9 +90,10 @@ def main() -> None:
     parser.add_argument("--packed", default="data/processed/qm9gwbse/qm9gwbse_packed.npz")
     parser.add_argument("--pred-dir", default="runs/head_to_head")
     parser.add_argument("--uma-test", default="runs/uma_qm9gwbse_richind_s{seed}.test_predictions.csv")
+    parser.add_argument("--uma-st-test", default="runs/uma_qm9gwbse_richind_st_s{seed}.test_predictions.csv")
     parser.add_argument("--visnet-test", default="runs/ensemble_preds/distill_s{seed}.test_predictions.csv")
     parser.add_argument("--their-primary", default="gapbse5M128502532", help="paper default: transfer model, 5M pretraining")
-    parser.add_argument("--weights", type=float, nargs=2, default=[0.6, 0.4], help="UMA, ViSNet")
+    parser.add_argument("--weights", type=float, nargs=3, default=[0.45, 0.20, 0.35], help="UMA, UMA S+T, ViSNet")
     parser.add_argument("--report", default="runs/head_to_head_report.json")
     args = parser.parse_args()
     pred_cols = [f"prediction_{c}" for c in ENERGY]
@@ -124,24 +126,27 @@ def main() -> None:
                                      "valid": frac > 0.5}
 
     uma = [read_csv_columns(args.uma_test.format(seed=s), pred_cols) for s in SEEDS]
+    uma_st = [read_csv_columns(args.uma_st_test.format(seed=s), pred_cols) for s in SEEDS]
     vis = [read_csv_columns(args.visnet_test.format(seed=s), pred_cols) for s in SEEDS]
     report["qm9gwbse"] = {}
     if report["rebuilt_split_check"]["valid"]:
         for subset, allowed in (("strict_their_test", {"test"}), ("disjoint_their_val_test", {"val", "test"})):
             keys = sorted(k for k in uma[0] if our_split.get(k) == "test" and their_split[k] in allowed)
             target = np.array([q_s1[k] for k in keys])
-            preds = {"ours_production": blend_sorted([uma, vis], args.weights, keys)[:, 0],
+            preds = {"ours_production": blend_sorted([uma, uma_st, vis], args.weights, keys)[:, 0],
                      "ours_uma_only": blend_sorted([uma], [1.0], keys)[:, 0],
                      **{f"theirs_{n}": np.array([theirs_qm9[n][k][0] for k in keys]) for n in finetuned}}
             report["qm9gwbse"][subset] = compare(target, preds, "ours_production", primary, their_names)
 
     ext_uma = [read_csv_columns(pred_dir / f"ext_uma_richind_s{s}.csv", pred_cols) for s in SEEDS]
+    ext_uma_st = [read_csv_columns(pred_dir / f"ext_uma_richind_st_s{s}.csv", pred_cols) for s in SEEDS]
     ext_vis = [read_csv_columns(pred_dir / f"ext_distill_s{s}.csv", pred_cols) for s in SEEDS]
     theirs_ext = {n: read_csv_columns(pred_dir / "visnetgwbse" / f"pool.{n}.csv", ["prediction_S1_eV"]) for n in finetuned}
     control = [r["molecule_key"] for r in labels if r["set"] == "QM9GWBSE_control"]
     report["control_max_abs_diff_eV"] = {
         f"{family}_s{s}": float(max(np.abs(ext[i][k] - stored[i][k.split(":")[1]]).max() for k in control))
-        for family, ext, stored in (("uma", ext_uma, uma), ("visnet", ext_vis, vis)) for i, s in enumerate(SEEDS)}
+        for family, ext, stored in (("uma", ext_uma, uma), ("uma_st", ext_uma_st, uma_st), ("visnet", ext_vis, vis))
+        for i, s in enumerate(SEEDS)}
     report["external"] = {}
     for set_name in sorted({r["set"] for r in labels} - {"QM9GWBSE_control"}):
         rows = [r for r in labels if r["set"] == set_name]
@@ -155,9 +160,10 @@ def main() -> None:
                 continue
             keys = [r["molecule_key"] for r in keep]
             target = np.array([float(r["S1_eV"]) for r in keep])
-            production, guarded = guarded_blend([ext_uma, ext_vis], args.weights, keys)
+            production, guarded = guarded_blend([ext_uma, ext_uma_st, ext_vis], args.weights, keys)
             preds = {"ours_production": production[:, 0],
                      "ours_uma_only": blend_sorted([ext_uma], [1.0], keys)[:, 0],
+                     "ours_uma_st_only": blend_sorted([ext_uma_st], [1.0], keys)[:, 0],
                      "ours_visnet_only": blend_sorted([ext_vis], [1.0], keys)[:, 0],
                      **{f"theirs_{n}": np.array([theirs_ext[n][k][0] for k in keys]) for n in finetuned}}
             row = compare(target, preds, "ours_production", primary, their_names)

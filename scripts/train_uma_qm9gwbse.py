@@ -188,10 +188,16 @@ class UMAExcitedState(nn.Module):
     readout="l0_mean" (TASK-211): l=0 node features, per-atom heads, per-molecule mean.
     readout="rich" (TASK-250, DOC-248 L3): l=0 plus per-l norms of the final embedding and of the
     last `readout_layers` block outputs, mean+std pooled.
+
+    aux_columns (TASK-287, rich readout only) adds a second-fidelity energy head, called with
+    forward(batch, fidelity="aux"). aux_mode="heads": the fidelities share only the backbone.
+    aux_mode="delta": the GW energies are the aux prediction plus a learned correction, so GW
+    predictions for chemistry seen only in the aux data inherit the aux head's trend.
     """
 
     def __init__(self, backbone, target_columns, target_mean, target_std, embed_dim: int = 128, head_hidden: int = 256,
-                 readout: str = "l0_mean", readout_layers: int = 0, lmax: int = 2):
+                 readout: str = "l0_mean", readout_layers: int = 0, lmax: int = 2,
+                 aux_columns=None, aux_mean=None, aux_std=None, aux_mode: str = "heads"):
         super().__init__()
         self.backbone = backbone
         self.readout = readout
@@ -217,11 +223,21 @@ class UMAExcitedState(nn.Module):
             raise ValueError(f"unknown readout {readout!r}")
         self.register_buffer("target_mean", torch.as_tensor(target_mean, dtype=torch.float32))
         self.register_buffer("target_std", torch.as_tensor(target_std, dtype=torch.float32))
+        self.aux_mode = aux_mode if aux_columns else None
+        self.aux_head = None
+        if self.aux_mode is not None:
+            if readout != "rich" or aux_mode not in ("heads", "delta"):
+                raise ValueError("aux targets need readout='rich' and aux_mode 'heads' or 'delta'")
+            if aux_mode == "delta" and [self.target_columns[i] for i in self.energy_indices] != list(aux_columns):
+                raise ValueError("aux_mode='delta' needs aux columns equal to the GW energy columns, in state order")
+            self.aux_head = _PooledHead(in_dim, head_hidden, len(aux_columns))
+            self.register_buffer("aux_mean", torch.as_tensor(aux_mean, dtype=torch.float32))
+            self.register_buffer("aux_std", torch.as_tensor(aux_std, dtype=torch.float32))
 
     def heads(self) -> list[nn.Module]:
-        return [h for h in (self.energy_head, self.oscillator_head) if h is not None]
+        return [h for h in (self.energy_head, self.oscillator_head, self.aux_head) if h is not None]
 
-    def forward(self, batch):
+    def forward(self, batch, fidelity: str = "gw"):
         num_molecules = int(batch.natoms.numel())
         embedding = self.backbone(batch)
         node_batch = embedding["batch"]
@@ -229,11 +245,19 @@ class UMAExcitedState(nn.Module):
             xs = [embedding["node_embedding"]]
             xs += [self.backbone.blocks[-1 - k]._gnn_captured for k in range(1, self.readout_layers + 1)]
             per_atom = torch.cat([spherical_invariants(x.float()) for x in xs], dim=-1)
+            if fidelity == "aux":
+                return self.aux_head(per_atom, node_batch, num_molecules) * self.aux_std + self.aux_mean
+            energy = self.energy_head(per_atom, node_batch, num_molecules)
             out = per_atom.new_empty(num_molecules, len(self.target_columns))
-            out[:, list(self.energy_indices)] = self.energy_head(per_atom, node_batch, num_molecules)
+            out[:, list(self.energy_indices)] = energy
             if self.oscillator_head is not None:
                 out[:, list(self.oscillator_indices)] = self.oscillator_head(per_atom, node_batch, num_molecules)
-            return out * self.target_std + self.target_mean
+            out = out * self.target_std + self.target_mean
+            if self.aux_mode == "delta":
+                e = list(self.energy_indices)
+                aux = self.aux_head(per_atom, node_batch, num_molecules) * self.aux_std + self.aux_mean
+                out[:, e] = aux + energy * self.target_std[e] + (self.target_mean[e] - self.aux_mean)
+            return out
         scalars = embedding["node_embedding"][:, 0, :].float()
         counts = torch.bincount(node_batch, minlength=num_molecules).clamp_min(1).unsqueeze(1).to(scalars.dtype)
 
@@ -369,6 +393,25 @@ def evaluate(model, loader, target_columns, loss_cfg, device, autocast_dtype=Non
     return metrics
 
 
+@torch.no_grad()
+def evaluate_aux(model, loader, device, autocast_dtype=None) -> float:
+    """Mean absolute error (eV) of the aux-fidelity head over all aux columns."""
+    model.eval()
+    total, count = 0.0, 0
+    for batch, target, _ in loader:
+        with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
+            pred = model(batch.to(device), fidelity="aux")
+        total += float((pred.float() - target.to(device)).abs().sum())
+        count += target.numel()
+    return total / max(count, 1)
+
+
+def cycle(loader):
+    """Endless iterator over a DataLoader (a fresh shuffle each pass)."""
+    while True:
+        yield from loader
+
+
 def write_history(path: Path, history: list[dict[str, Any]]) -> None:
     fields: list[str] = []
     for record in history:
@@ -414,6 +457,26 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     val_loader = DataLoader(datasets["val"], shuffle=False, **loader_kwargs)
     test_loader = DataLoader(datasets["test"], shuffle=False, **loader_kwargs)
 
+    # aux (TASK-287): {packed_path, columns, mode, weight, batch_size}. A second-fidelity packed set
+    # (train/val split column); each GW step is followed by one aux step on the same optimizer.
+    aux_cfg = config.get("aux") or {}
+    aux_columns, aux_mean, aux_std, aux_loaders = None, None, None, {}
+    if aux_cfg:
+        aux_arrays = dict(np.load(aux_cfg["packed_path"], allow_pickle=False))
+        aux_available = [str(c) for c in aux_arrays["target_columns"]]
+        aux_columns = tuple(aux_cfg.get("columns") or aux_available)
+        aux_index = np.asarray([aux_available.index(c) for c in aux_columns])
+        aux_split = aux_arrays["split"].astype(str)
+        aux_idx = {name: np.flatnonzero(aux_split == name) for name in ("train", "val")}
+        aux_train_targets = aux_arrays["targets"][aux_idx["train"]][:, aux_index]
+        aux_mean, aux_std = aux_train_targets.mean(axis=0), np.maximum(aux_train_targets.std(axis=0), 1e-6)
+        aux_kwargs = {**loader_kwargs, "batch_size": int(aux_cfg.get("batch_size", train_cfg["batch_size"]))}
+        aux_loaders = {
+            "train": DataLoader(PackedMolecules(aux_arrays, aux_idx["train"], aux_index), shuffle=True, drop_last=True,
+                                generator=torch.Generator().manual_seed(seed + 1), **aux_kwargs),
+            "val": DataLoader(PackedMolecules(aux_arrays, aux_idx["val"], aux_index), shuffle=False, **aux_kwargs),
+        }
+
     if bool(train_cfg.get("mole_split_patch", True)):
         patch_mole_split_forward()
     backbone = load_backbone(model_cfg["checkpoint_path"])
@@ -427,6 +490,7 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
         embed_dim=embed_dim, head_hidden=int(model_cfg.get("head_hidden", 256)),
         readout=str(model_cfg.get("readout", "l0_mean")), readout_layers=int(model_cfg.get("readout_layers", 0)),
         lmax=int(model_cfg.get("lmax", 2)),
+        aux_columns=aux_columns, aux_mean=aux_mean, aux_std=aux_std, aux_mode=str(aux_cfg.get("mode", "heads")),
     ).to(device)
     if head_init_seed is not None:
         torch.manual_seed(seed)
@@ -531,13 +595,20 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     }
     print(json.dumps({k: summary[k] for k in ("split_sizes", "parameters", "gpu")}), flush=True)
 
+    if aux_cfg:
+        summary["aux"] = {"packed_path": aux_cfg["packed_path"], "mode": model.aux_mode, "columns": list(aux_columns),
+                          "weight": float(aux_cfg.get("weight", 1.0)),
+                          "split_sizes": {name: len(loader.dataset) for name, loader in aux_loaders.items()}}
+    aux_weight = float(aux_cfg.get("weight", 1.0))
+    aux_iter = cycle(aux_loaders["train"]) if aux_cfg and epochs else None
+
     history: list[dict[str, Any]] = []
     best_val, best_epoch, skipped = math.inf, None, 0
     started = time.perf_counter()
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_start = time.perf_counter()
-        running, seen = 0.0, 0
+        running, seen, aux_running, aux_seen = 0.0, 0, 0.0, 0
         for step, (batch, target, _) in enumerate(train_loader, start=1):
             batch, target = batch.to(device), target.to(device)
             with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
@@ -552,6 +623,17 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
                 continue
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            if aux_iter is not None:
+                # Separate backward pass, so peak memory stays at one batch.
+                aux_batch, aux_target, _ = next(aux_iter)
+                aux_batch, aux_target = aux_batch.to(device), aux_target.to(device)
+                with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
+                    aux_pred = model(aux_batch, fidelity="aux")
+                aux_loss = qm9gwbse_loss(aux_pred.float(), aux_target, aux_columns, **loss_kwargs(loss_cfg))
+                if torch.isfinite(aux_loss):
+                    (aux_weight * aux_loss).backward()
+                    aux_running += float(aux_loss) * aux_target.size(0)
+                    aux_seen += aux_target.size(0)
             if max_grad_norm:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
@@ -579,6 +661,10 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             "epoch_seconds": time.perf_counter() - epoch_start,
             "skipped_nonfinite_batches": skipped,
         }
+        if aux_cfg:
+            record["aux_train_loss"] = aux_running / max(aux_seen, 1)
+            record["aux_val_energy_eV_mae"] = evaluate_aux(eval_model, aux_loaders["val"], device, autocast_dtype)
+            record["epoch_seconds"] = time.perf_counter() - epoch_start
         history.append(record)
         selection_value = record.get(checkpoint_metric)
         if selection_value is None or not math.isfinite(float(selection_value)):
@@ -625,6 +711,14 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     summary.update(status="completed", completed_at=_utc_now(), best_epoch=best_epoch, val_metrics=val_metrics,
                    test_metrics=test_metrics, predictions_csv_path=str(predictions_path),
                    val_predictions_csv_path=str(val_predictions_path))
+    if aux_cfg:
+        summary["aux"]["val_energy_eV_mae"] = evaluate_aux(model, aux_loaders["val"], device, autocast_dtype)
+    # post_inference: {pool_path, out_csv}: the selected model also predicts an unlabeled pool (TASK-287).
+    post_cfg = config.get("post_inference") or {}
+    if post_cfg:
+        n = predict_pool(model, post_cfg["pool_path"], post_cfg["out_csv"], target_columns, device,
+                         int(post_cfg.get("batch_size", train_cfg["batch_size"])), int(train_cfg.get("num_workers", 8)))
+        summary["post_inference"] = {"pool_path": post_cfg["pool_path"], "out_csv": post_cfg["out_csv"], "molecules": n}
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("TEST " + json.dumps(test_metrics), flush=True)
     if wandb_run is not None:
