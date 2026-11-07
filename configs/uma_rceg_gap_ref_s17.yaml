@@ -1,0 +1,56 @@
+# rCEG comparison (KNOW-293): UMA-S rich readout fine-tuned on the B3LYP HOMO-LUMO gap from
+# rCEG's real-label pool only (~1.7k molecules: QM9 overlap + Psi4 recomputations), its real-label budget. Test split = rCEG's 424 held-out molecules (scripts/build_rceg_comparison.py).
+model:
+  checkpoint_path: checkpoints/uma/checkpoints/uma-s-1p2p1.pt
+  head_hidden: 256
+  readout: rich
+  readout_layers: 1
+  lmax: 2
+dataset:
+  packed_path: data/processed/rceg_compare/ref.npz
+targets:
+  columns:
+  - gap_eV
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 0.0
+  gap_weight: 0.0
+  ordering_weight: 0.0
+training:
+  device: cuda
+  seed: 17
+  epochs: 150
+  batch_size: 32
+  backbone_lr: 0.0002
+  head_lr: 0.001
+  backbone_weight_decay: 0.0
+  head_weight_decay: 0.001
+  max_grad_norm: 1.0
+  bf16: false
+  mole_split_patch: true
+  num_workers: 8
+  max_hours: 3
+  scheduler:
+    warmup_epochs: 5
+    start_factor: 0.01
+    min_factor: 0.01
+  checkpoint_path: checkpoints/uma_rceg_gap_ref_s17.pt
+  metrics_csv_path: runs/uma_rceg_gap_ref_s17.metrics.csv
+  summary_json_path: runs/uma_rceg_gap_ref_s17.summary.json
+  checkpoint_metric: val_energy_eV_mae
+  ema_decay: 0.999
+  layer_lr_decay: 0.85
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: uma_rceg_gap_ref_s17
+  group: rceg-compare
+  tags:
+  - HOMO-LUMO
+  - rCEG
+  - UMA-S
+post_inference:
+  pool_path: data/processed/rceg_compare/pool_smiles.npz
+  out_csv: runs/rceg/uma_rceg_gap_ref_s17.smiles_pool.csv

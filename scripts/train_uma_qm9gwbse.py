@@ -53,8 +53,8 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def molecule_data(numbers: np.ndarray, positions: np.ndarray):
-    """Closed-shell neutral molecule for the omol task (spin is multiplicity, so 1)."""
+def molecule_data(numbers: np.ndarray, positions: np.ndarray, charge: int = 0, spin: int = 1):
+    """One molecule for the omol task. spin is the multiplicity (1 for closed shell)."""
     from fairchem.core.datasets.atomic_data import AtomicData
 
     n = int(numbers.size)
@@ -67,12 +67,18 @@ def molecule_data(numbers: np.ndarray, positions: np.ndarray):
         edge_index=torch.empty(2, 0, dtype=torch.long),
         cell_offsets=torch.empty(0, 3),
         nedges=torch.tensor([0]),
-        charge=torch.tensor([0]),
-        spin=torch.tensor([1]),
+        charge=torch.tensor([int(charge)]),
+        spin=torch.tensor([int(spin)]),
         fixed=torch.zeros(n, dtype=torch.long),
         tags=torch.zeros(n, dtype=torch.long),
         dataset="omol",
     )
+
+
+def _charge_spin(arrays: dict[str, np.ndarray], n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Optional per-molecule `charge` and `spin` (multiplicity) arrays; neutral singlets otherwise."""
+    return (np.asarray(arrays.get("charge", np.zeros(n)), dtype=np.int64),
+            np.asarray(arrays.get("spin", np.ones(n)), dtype=np.int64))
 
 
 class PackedMolecules(Dataset):
@@ -81,6 +87,7 @@ class PackedMolecules(Dataset):
         self.positions = arrays["positions"]
         self.offsets = arrays["atom_offsets"]
         self.targets = arrays["targets"][:, target_index].astype(np.float32)
+        self.charge, self.spin = _charge_spin(arrays, self.targets.shape[0])
         self.indices = np.asarray(indices, dtype=np.int64)
 
     def __len__(self) -> int:
@@ -89,21 +96,24 @@ class PackedMolecules(Dataset):
     def __getitem__(self, i: int):
         m = int(self.indices[i])
         start, end = int(self.offsets[m]), int(self.offsets[m + 1])
-        return molecule_data(self.numbers[start:end], self.positions[start:end]), torch.from_numpy(self.targets[m]), m
+        data = molecule_data(self.numbers[start:end], self.positions[start:end], self.charge[m], self.spin[m])
+        return data, torch.from_numpy(self.targets[m]), m
 
 
 class PoolMolecules(Dataset):
-    """Unlabeled packed pool (numbers, positions, atom_offsets) for teacher inference."""
+    """Unlabeled packed pool (numbers, positions, atom_offsets; optional charge, spin) for inference."""
 
     def __init__(self, pool: dict[str, np.ndarray]):
         self.numbers, self.positions, self.offsets = pool["numbers"], pool["positions"], pool["atom_offsets"]
+        self.charge, self.spin = _charge_spin(pool, int(self.offsets.size - 1))
 
     def __len__(self) -> int:
         return int(self.offsets.size - 1)
 
     def __getitem__(self, i: int):
         start, end = int(self.offsets[i]), int(self.offsets[i + 1])
-        return molecule_data(self.numbers[start:end], self.positions[start:end]), torch.zeros(1), i
+        data = molecule_data(self.numbers[start:end], self.positions[start:end], self.charge[i], self.spin[i])
+        return data, torch.zeros(1), i
 
 
 @torch.no_grad()
