@@ -73,6 +73,7 @@ def main() -> None:
     parser.add_argument("--max-atoms", type=int, default=40)
     parser.add_argument("--val-fraction", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--skip-chonf", action="store_true", help="write heavy.npz only")
     parser.add_argument("--out-dir", default="data/processed/pubchemqc_aux")
     args = parser.parse_args()
     rng = np.random.default_rng(args.seed)
@@ -107,15 +108,20 @@ def main() -> None:
                          not in external for r in rows], dtype=bool)
         return rows[keep], int((~keep).sum())
 
-    heavy = rng.choice(heavy_candidates, size=min(int(args.n_heavy * 1.02), heavy_candidates.size), replace=False)
-    heavy, heavy_dropped = drop_external(np.sort(heavy))
-    heavy = np.sort(rng.choice(heavy, size=min(args.n_heavy, heavy.size), replace=False))
-    chonf = matched_sample(heavy_atoms, heavy, chonf_candidates, rng)
-    chonf, chonf_dropped = drop_external(chonf)
-
-    report = {"max_atoms": args.max_atoms, "candidates": {"heavy": int(heavy_candidates.size), "chonf": int(chonf_candidates.size)},
-              "dropped_external_matches": {"heavy": heavy_dropped, "chonf": chonf_dropped}, "subsets": {}}
-    for name, rows in (("heavy", heavy), ("chonf", chonf)):
+    # A prefix of one seeded permutation, so runs with the same seed and different --n-heavy get
+    # nested subsets (the exchange-rate curve, TASK-291). The wave D 200k set predates this.
+    order = rng.permutation(heavy_candidates)
+    heavy, heavy_dropped = drop_external(order[:min(int(args.n_heavy * 1.02) + 100, order.size)])
+    heavy = np.sort(heavy[:args.n_heavy])
+    subsets = [("heavy", heavy)]
+    report = {"max_atoms": args.max_atoms, "n_heavy": args.n_heavy, "seed": args.seed,
+              "candidates": {"heavy": int(heavy_candidates.size), "chonf": int(chonf_candidates.size)},
+              "dropped_external_matches": {"heavy": heavy_dropped}, "subsets": {}}
+    if not args.skip_chonf:
+        chonf = matched_sample(heavy_atoms, heavy, chonf_candidates, rng)
+        chonf, report["dropped_external_matches"]["chonf"] = drop_external(chonf)
+        subsets.append(("chonf", chonf))
+    for name, rows in subsets:
         write_subset(out / f"{name}.npz", rows, numbers, positions, offsets, energies, keys, args.val_fraction, rng)
         report["subsets"][name] = {
             "molecules": int(rows.size),

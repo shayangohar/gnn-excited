@@ -1,0 +1,96 @@
+# TASK-291 E1: heavy-aux production candidates vs the current production (KNOW-288). Weights on val.
+# Each member's `pool` CSV is its external head-to-head prediction (scripts/blend_pool_predictions.py).
+grid_step: 0.05
+members:
+  uma_richind_s17:
+    val: runs/uma_qm9gwbse_richind_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_s17.csv
+  uma_richind_st_s17:
+    val: runs/uma_qm9gwbse_richind_st_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_s17.csv
+  distill_s17:
+    val: runs/ensemble_preds/distill_s17.val_predictions.csv
+    test: runs/ensemble_preds/distill_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_distill_s17.csv
+  he_heads_s17:
+    val: runs/uma_qm9gwbse_richind_he_heads_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_he_heads_s17.csv
+  st_he_heads_s17:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_he_heads_s17.csv
+  uma_richind_s18:
+    val: runs/uma_qm9gwbse_richind_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s18.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_s18.csv
+  uma_richind_st_s18:
+    val: runs/uma_qm9gwbse_richind_st_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s18.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_s18.csv
+  distill_s18:
+    val: runs/ensemble_preds/distill_s18.val_predictions.csv
+    test: runs/ensemble_preds/distill_s18.test_predictions.csv
+    pool: runs/head_to_head/ext_distill_s18.csv
+  he_heads_s18:
+    val: runs/uma_qm9gwbse_richind_he_heads_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s18.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_he_heads_s18.csv
+  st_he_heads_s18:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s18.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_he_heads_s18.csv
+  uma_richind_s19:
+    val: runs/uma_qm9gwbse_richind_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_s19.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_s19.csv
+  uma_richind_st_s19:
+    val: runs/uma_qm9gwbse_richind_st_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s19.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_s19.csv
+  distill_s19:
+    val: runs/ensemble_preds/distill_s19.val_predictions.csv
+    test: runs/ensemble_preds/distill_s19.test_predictions.csv
+    pool: runs/head_to_head/ext_distill_s19.csv
+  he_heads_s19:
+    val: runs/uma_qm9gwbse_richind_he_heads_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s19.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_he_heads_s19.csv
+  st_he_heads_s19:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s19.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_st_he_heads_s19.csv
+  he_delta_s17:
+    val: runs/uma_qm9gwbse_richind_he_delta_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_delta_s17.test_predictions.csv
+    pool: runs/head_to_head/ext_uma_richind_he_delta_s17.csv
+groups:
+  uma_richind:
+  - uma_richind_s17
+  - uma_richind_s18
+  - uma_richind_s19
+  uma_richind_st:
+  - uma_richind_st_s17
+  - uma_richind_st_s18
+  - uma_richind_st_s19
+  distill:
+  - distill_s17
+  - distill_s18
+  - distill_s19
+  he_heads:
+  - he_heads_s17
+  - he_heads_s18
+  - he_heads_s19
+  st_he_heads:
+  - st_he_heads_s17
+  - st_he_heads_s18
+  - st_he_heads_s19
+  he_delta:
+  - he_delta_s17
+blends:
+- [uma_richind, uma_richind_st, distill]
+- [he_heads, st_he_heads, distill]
+- [he_heads, st_he_heads, distill, he_delta]
+- [he_heads, distill]
