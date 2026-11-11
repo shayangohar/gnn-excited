@@ -1,0 +1,75 @@
+# TASK-310 (wave F, cheap-geometry fix): uma_qm9gwbse_richind_s17.yaml trained on SMILES-derived GFN2-xTB
+# geometries (scripts/build_xtb_packed.py; same keys, labels and split). Compare with richind_s17 on the
+# wave E geometry pools (KNOW-308) via post_inference and scripts/geometry_training_report.py.
+model:
+  checkpoint_path: checkpoints/uma/checkpoints/uma-s-1p2p1.pt
+  head_hidden: 256
+  readout: rich
+  readout_layers: 1
+  lmax: 2
+dataset:
+  packed_path: data/processed/qm9gwbse_xtb/qm9gwbse_xtb_packed.npz
+targets:
+  columns:
+  - S1_eV
+  - log1p_S1_f
+  - S2_eV
+  - log1p_S2_f
+  - S3_eV
+  - log1p_S3_f
+  - S4_eV
+  - log1p_S4_f
+  - S5_eV
+  - log1p_S5_f
+loss:
+  type: qm9gwbse
+  energy_weight: 1.0
+  oscillator_weight: 1.0
+  gap_weight: 0.1
+  ordering_weight: 0.01
+training:
+  device: cuda
+  seed: 17
+  epochs: 40
+  batch_size: 64
+  backbone_lr: 0.0002
+  head_lr: 0.001
+  backbone_weight_decay: 0.0
+  head_weight_decay: 0.001
+  max_grad_norm: 1.0
+  bf16: false
+  mole_split_patch: true
+  num_workers: 8
+  max_hours: 18
+  scheduler:
+    warmup_epochs: 2
+    start_factor: 0.01
+    min_factor: 0.01
+  checkpoint_path: checkpoints/uma_qm9gwbse_richind_xtb_s17.pt
+  metrics_csv_path: runs/uma_qm9gwbse_richind_xtb_s17.metrics.csv
+  summary_json_path: runs/uma_qm9gwbse_richind_xtb_s17.summary.json
+  checkpoint_metric: val_energy_eV_mae
+  ema_decay: 0.999
+  layer_lr_decay: 0.85
+wandb:
+  enabled: true
+  entity: shayangohar2007-fresno-state
+  project: gnn-excited
+  name: uma_qm9gwbse_richind_xtb_s17
+  group: uma-wave-f
+  tags:
+  - QM9GWBSE
+  - S1-S5
+  - UMA-S
+  - foundation-model
+  - full-finetune
+  - TASK-310
+post_inference:
+  - pool_path: data/processed/cheap_geometry/pool_b3lyp.npz
+    out_csv: runs/cheap_geometry/b3lyp.uma_richind_xtb_s17.csv
+  - pool_path: data/processed/cheap_geometry/pool_etkdg.npz
+    out_csv: runs/cheap_geometry/etkdg.uma_richind_xtb_s17.csv
+  - pool_path: data/processed/cheap_geometry/pool_xtb.npz
+    out_csv: runs/cheap_geometry/xtb.uma_richind_xtb_s17.csv
+  - pool_path: data/processed/cheap_geometry/pool_uma.npz
+    out_csv: runs/cheap_geometry/uma.uma_richind_xtb_s17.csv

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Head-to-head S1 report: our production blend vs Baum et al. ViSNetGWBSE (TASK-271, DOC-248 L13).
 
-Production (promoted 2026-11-03) is 0.45 * mean(UMA richind x3) + 0.20 * mean(UMA richind S+T x3)
-+ 0.35 * mean(distilled ViSNet x3), with each molecule's five singlet energies sorted. Their
-checkpoints predict S1 only, so the comparison is S1.
+Production is the singlet blend in --production (configs/production.yaml; he4 since 2026-11-11):
+a weighted sum of seed-averaged model families, with each molecule's five singlet energies sorted.
+Their checkpoints predict S1 only, so the comparison is S1.
 
 Their side is reported two ways: the paper's default checkpoint (--their-primary, chosen before
 seeing any result) and, per subset, their best checkpoint on that subset ("oracle", optimistic for
@@ -32,7 +32,6 @@ from pathlib import Path
 import numpy as np
 
 ENERGY = [f"S{i}_eV" for i in range(1, 6)]
-SEEDS = (17, 18, 19)
 VALID_EV = (0.0, 30.0)  # outside this a member has failed (OE62L:SEJDAM, a 0.75 A H-H contact, gives 1e9 eV)
 
 
@@ -62,6 +61,26 @@ def guarded_blend(groups: list[list[dict[str, np.ndarray]]], weights: list[float
     return np.sort(pred, axis=1), int((~ok).any(axis=0).sum())
 
 
+def load_production(path: str | Path, part: str = "singlets") -> list[dict]:
+    """Families of one part ('singlets' or 'triplets') of a production spec, weights summing to 1."""
+    import yaml
+
+    with open(path, encoding="utf-8") as stream:
+        families = yaml.safe_load(stream)[part]
+    total = sum(float(f["weight"]) for f in families)
+    if not np.isclose(total, 1.0):
+        raise ValueError(f"{path} {part} weights sum to {total}, not 1")
+    names = [f["family"] for f in families]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{path} {part} repeats a family name")
+    return families
+
+
+def family_predictions(family: dict, field: str, columns: list[str]) -> list[dict[str, np.ndarray]]:
+    """One prediction dict per seed of a production family, from the path pattern in `field`."""
+    return [read_csv_columns(family[field].format(seed=s), columns) for s in family["seeds"]]
+
+
 def paired_bootstrap(err_a: np.ndarray, err_b: np.ndarray, n_boot: int = 2000, seed: int = 0) -> list[float]:
     """95% interval of mean(|err_a|) - mean(|err_b|) over molecules resampled with replacement."""
     diff = np.abs(err_a) - np.abs(err_b)
@@ -89,16 +108,15 @@ def main() -> None:
     parser.add_argument("--their-split", default="data/processed/external_testsets/visnetgwbse_split.csv")
     parser.add_argument("--packed", default="data/processed/qm9gwbse/qm9gwbse_packed.npz")
     parser.add_argument("--pred-dir", default="runs/head_to_head")
-    parser.add_argument("--uma-test", default="runs/uma_qm9gwbse_richind_s{seed}.test_predictions.csv")
-    parser.add_argument("--uma-st-test", default="runs/uma_qm9gwbse_richind_st_s{seed}.test_predictions.csv")
-    parser.add_argument("--visnet-test", default="runs/ensemble_preds/distill_s{seed}.test_predictions.csv")
+    parser.add_argument("--production", default="configs/production.yaml", help="production spec (singlets part)")
     parser.add_argument("--their-primary", default="gapbse5M128502532", help="paper default: transfer model, 5M pretraining")
-    parser.add_argument("--weights", type=float, nargs=3, default=[0.45, 0.20, 0.35], help="UMA, UMA S+T, ViSNet")
     parser.add_argument("--report", default="runs/head_to_head_report.json")
     args = parser.parse_args()
     pred_cols = [f"prediction_{c}" for c in ENERGY]
     pred_dir = Path(args.pred_dir)
     primary = f"theirs_{args.their_primary}"
+    families = load_production(args.production)
+    weights = [float(f["weight"]) for f in families]
 
     q = np.load(args.packed, allow_pickle=False)
     q_keys = [str(k) for k in q["molecule_key"]]
@@ -115,7 +133,8 @@ def main() -> None:
     their_names = [f"theirs_{n}" for n in finetuned]
 
     # Rebuilt-split diagnostics: their MAE by rebuilt split, and where their released QM9 test set falls.
-    report = {"weights": args.weights, "their_primary": args.their_primary, "their_checkpoints": {}}
+    report = {"production": args.production, "weights": {f["family"]: float(f["weight"]) for f in families},
+              "their_primary": args.their_primary, "their_checkpoints": {}}
     for name, pred in theirs_qm9.items():
         report["their_checkpoints"][name] = {
             f"rebuilt_{split}_S1_mae_eV": float(np.nanmean([abs(pred[k][0] - q_s1[k]) for k in q_keys if their_split[k] == split]))
@@ -125,28 +144,24 @@ def main() -> None:
     report["rebuilt_split_check"] = {"their_qm9_test_ids": len(released), "fraction_in_rebuilt_test": frac,
                                      "valid": frac > 0.5}
 
-    uma = [read_csv_columns(args.uma_test.format(seed=s), pred_cols) for s in SEEDS]
-    uma_st = [read_csv_columns(args.uma_st_test.format(seed=s), pred_cols) for s in SEEDS]
-    vis = [read_csv_columns(args.visnet_test.format(seed=s), pred_cols) for s in SEEDS]
+    test_groups = [family_predictions(f, "test", pred_cols) for f in families]
     report["qm9gwbse"] = {}
     if report["rebuilt_split_check"]["valid"]:
         for subset, allowed in (("strict_their_test", {"test"}), ("disjoint_their_val_test", {"val", "test"})):
-            keys = sorted(k for k in uma[0] if our_split.get(k) == "test" and their_split[k] in allowed)
+            keys = sorted(k for k in test_groups[0][0] if our_split.get(k) == "test" and their_split[k] in allowed)
             target = np.array([q_s1[k] for k in keys])
-            preds = {"ours_production": blend_sorted([uma, uma_st, vis], args.weights, keys)[:, 0],
-                     "ours_uma_only": blend_sorted([uma], [1.0], keys)[:, 0],
+            preds = {"ours_production": blend_sorted(test_groups, weights, keys)[:, 0],
+                     **{f"ours_{f['family']}_only": blend_sorted([g], [1.0], keys)[:, 0] for f, g in zip(families, test_groups)},
                      **{f"theirs_{n}": np.array([theirs_qm9[n][k][0] for k in keys]) for n in finetuned}}
             report["qm9gwbse"][subset] = compare(target, preds, "ours_production", primary, their_names)
 
-    ext_uma = [read_csv_columns(pred_dir / f"ext_uma_richind_s{s}.csv", pred_cols) for s in SEEDS]
-    ext_uma_st = [read_csv_columns(pred_dir / f"ext_uma_richind_st_s{s}.csv", pred_cols) for s in SEEDS]
-    ext_vis = [read_csv_columns(pred_dir / f"ext_distill_s{s}.csv", pred_cols) for s in SEEDS]
+    ext_groups = [family_predictions(f, "external", pred_cols) for f in families]
     theirs_ext = {n: read_csv_columns(pred_dir / "visnetgwbse" / f"pool.{n}.csv", ["prediction_S1_eV"]) for n in finetuned}
     control = [r["molecule_key"] for r in labels if r["set"] == "QM9GWBSE_control"]
     report["control_max_abs_diff_eV"] = {
-        f"{family}_s{s}": float(max(np.abs(ext[i][k] - stored[i][k.split(":")[1]]).max() for k in control))
-        for family, ext, stored in (("uma", ext_uma, uma), ("uma_st", ext_uma_st, uma_st), ("visnet", ext_vis, vis))
-        for i, s in enumerate(SEEDS)}
+        f"{f['family']}_s{s}": float(max(np.abs(ext[i][k] - stored[i][k.split(":")[1]]).max() for k in control))
+        for f, ext, stored in zip(families, ext_groups, test_groups)
+        for i, s in enumerate(f["seeds"])}
     report["external"] = {}
     for set_name in sorted({r["set"] for r in labels} - {"QM9GWBSE_control"}):
         rows = [r for r in labels if r["set"] == set_name]
@@ -160,11 +175,9 @@ def main() -> None:
                 continue
             keys = [r["molecule_key"] for r in keep]
             target = np.array([float(r["S1_eV"]) for r in keep])
-            production, guarded = guarded_blend([ext_uma, ext_uma_st, ext_vis], args.weights, keys)
+            production, guarded = guarded_blend(ext_groups, weights, keys)
             preds = {"ours_production": production[:, 0],
-                     "ours_uma_only": blend_sorted([ext_uma], [1.0], keys)[:, 0],
-                     "ours_uma_st_only": blend_sorted([ext_uma_st], [1.0], keys)[:, 0],
-                     "ours_visnet_only": blend_sorted([ext_vis], [1.0], keys)[:, 0],
+                     **{f"ours_{f['family']}_only": blend_sorted([g], [1.0], keys)[:, 0] for f, g in zip(families, ext_groups)},
                      **{f"theirs_{n}": np.array([theirs_ext[n][k][0] for k in keys]) for n in finetuned}}
             row = compare(target, preds, "ours_production", primary, their_names)
             row["ours_production_guarded_molecules"] = guarded

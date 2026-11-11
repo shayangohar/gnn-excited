@@ -247,14 +247,18 @@ class UMAExcitedState(nn.Module):
     def heads(self) -> list[nn.Module]:
         return [h for h in (self.energy_head, self.oscillator_head, self.aux_head) if h is not None]
 
+    def rich_features(self, embedding) -> torch.Tensor:
+        """Per-atom rich-readout input: invariants of the final embedding and the captured block outputs."""
+        xs = [embedding["node_embedding"]]
+        xs += [self.backbone.blocks[-1 - k]._gnn_captured for k in range(1, self.readout_layers + 1)]
+        return torch.cat([spherical_invariants(x.float()) for x in xs], dim=-1)
+
     def forward(self, batch, fidelity: str = "gw"):
         num_molecules = int(batch.natoms.numel())
         embedding = self.backbone(batch)
         node_batch = embedding["batch"]
         if self.readout == "rich":
-            xs = [embedding["node_embedding"]]
-            xs += [self.backbone.blocks[-1 - k]._gnn_captured for k in range(1, self.readout_layers + 1)]
-            per_atom = torch.cat([spherical_invariants(x.float()) for x in xs], dim=-1)
+            per_atom = self.rich_features(embedding)
             if fidelity == "aux":
                 return self.aux_head(per_atom, node_batch, num_molecules) * self.aux_std + self.aux_mean
             energy = self.energy_head(per_atom, node_batch, num_molecules)
@@ -487,6 +491,25 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             "val": DataLoader(PackedMolecules(aux_arrays, aux_idx["val"], aux_index), shuffle=False, **aux_kwargs),
         }
 
+    # shots (TASK-310): a few extra GW-labelled molecules (energy columns only, e.g. OE62H) for the GW
+    # head: {packed_path, columns, weight, batch_size}. Every row of the file is used; each GW step is
+    # followed by one shots step, so a small set is revisited many times per epoch.
+    shots_cfg = config.get("shots") or {}
+    shots_loader, shots_columns, shots_positions = None, None, None
+    if shots_cfg:
+        shots_arrays = dict(np.load(shots_cfg["packed_path"], allow_pickle=False))
+        shots_available = [str(c) for c in shots_arrays["target_columns"]]
+        shots_columns = tuple(shots_cfg.get("columns") or shots_available)
+        if any(c not in target_columns or not c.endswith("_eV") for c in shots_columns):
+            raise ValueError("shots columns must be energy columns among the GW target columns")
+        shots_positions = [target_columns.index(c) for c in shots_columns]
+        shots_rows = np.arange(shots_arrays["targets"].shape[0])
+        shots_loader = DataLoader(
+            PackedMolecules(shots_arrays, shots_rows, np.asarray([shots_available.index(c) for c in shots_columns])),
+            shuffle=True, drop_last=True, generator=torch.Generator().manual_seed(seed + 2),
+            **{**loader_kwargs, "batch_size": min(int(shots_cfg.get("batch_size", 8)), shots_rows.size),
+               "num_workers": 2, "persistent_workers": True})
+
     if bool(train_cfg.get("mole_split_patch", True)):
         patch_mole_split_forward()
     backbone = load_backbone(model_cfg["checkpoint_path"])
@@ -504,6 +527,12 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     ).to(device)
     if head_init_seed is not None:
         torch.manual_seed(seed)
+    # training.init_checkpoint (TASK-310): start from a trained model's full state (heads and buffers
+    # included), e.g. to fine-tune. The model must be built with the same targets, readout and aux.
+    init_checkpoint = train_cfg.get("init_checkpoint")
+    if init_checkpoint:
+        model.load_state_dict(torch.load(init_checkpoint, map_location=device, weights_only=False)["model_state_dict"])
+        print(f"initialised from {init_checkpoint}", flush=True)
 
     # inference: {pool_path, checkpoint_paths, out_csvs}: teacher predictions on an unlabeled pool, then exit.
     inference_cfg = config.get("inference") or {}
@@ -611,6 +640,11 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
                           "split_sizes": {name: len(loader.dataset) for name, loader in aux_loaders.items()}}
     aux_weight = float(aux_cfg.get("weight", 1.0))
     aux_iter = cycle(aux_loaders["train"]) if aux_cfg and epochs else None
+    if shots_cfg:
+        summary["shots"] = {"packed_path": shots_cfg["packed_path"], "columns": list(shots_columns),
+                            "weight": float(shots_cfg.get("weight", 1.0)), "molecules": len(shots_loader.dataset)}
+    shots_weight = float(shots_cfg.get("weight", 1.0))
+    shots_iter = cycle(shots_loader) if shots_loader is not None and epochs else None
 
     history: list[dict[str, Any]] = []
     best_val, best_epoch, skipped = math.inf, None, 0
@@ -618,7 +652,7 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_start = time.perf_counter()
-        running, seen, aux_running, aux_seen = 0.0, 0, 0.0, 0
+        running, seen, aux_running, aux_seen, shots_running, shots_seen = 0.0, 0, 0.0, 0, 0.0, 0
         for step, (batch, target, _) in enumerate(train_loader, start=1):
             batch, target = batch.to(device), target.to(device)
             with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
@@ -644,6 +678,16 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
                     (aux_weight * aux_loss).backward()
                     aux_running += float(aux_loss) * aux_target.size(0)
                     aux_seen += aux_target.size(0)
+            if shots_iter is not None:
+                shot_batch, shot_target, _ = next(shots_iter)
+                shot_batch, shot_target = shot_batch.to(device), shot_target.to(device)
+                with torch.autocast("cuda", dtype=autocast_dtype, enabled=autocast_dtype is not None):
+                    shot_pred = model(shot_batch)[:, shots_positions]
+                shot_loss = qm9gwbse_loss(shot_pred.float(), shot_target, shots_columns, **loss_kwargs(loss_cfg))
+                if torch.isfinite(shot_loss):
+                    (shots_weight * shot_loss).backward()
+                    shots_running += float(shot_loss) * shot_target.size(0)
+                    shots_seen += shot_target.size(0)
             if max_grad_norm:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
@@ -675,8 +719,11 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
             record["aux_train_loss"] = aux_running / max(aux_seen, 1)
             record["aux_val_energy_eV_mae"] = evaluate_aux(eval_model, aux_loaders["val"], device, autocast_dtype)
             record["epoch_seconds"] = time.perf_counter() - epoch_start
+        if shots_iter is not None:
+            record["shots_train_loss"] = shots_running / max(shots_seen, 1)
         history.append(record)
-        selection_value = record.get(checkpoint_metric)
+        # checkpoint_metric "last_epoch" keeps the final epoch (a fixed fine-tuning schedule).
+        selection_value = -float(epoch) if checkpoint_metric == "last_epoch" else record.get(checkpoint_metric)
         if selection_value is None or not math.isfinite(float(selection_value)):
             raise ValueError(f"checkpoint_metric {checkpoint_metric!r} missing or non-finite; record keys: {sorted(record)}")
         if selection_value < best_val:
@@ -723,12 +770,16 @@ def run(config: dict[str, Any], config_path: str) -> dict[str, Any]:
                    val_predictions_csv_path=str(val_predictions_path))
     if aux_cfg:
         summary["aux"]["val_energy_eV_mae"] = evaluate_aux(model, aux_loaders["val"], device, autocast_dtype)
-    # post_inference: {pool_path, out_csv}: the selected model also predicts an unlabeled pool (TASK-287).
-    post_cfg = config.get("post_inference") or {}
-    if post_cfg:
-        n = predict_pool(model, post_cfg["pool_path"], post_cfg["out_csv"], target_columns, device,
-                         int(post_cfg.get("batch_size", train_cfg["batch_size"])), int(train_cfg.get("num_workers", 8)))
-        summary["post_inference"] = {"pool_path": post_cfg["pool_path"], "out_csv": post_cfg["out_csv"], "molecules": n}
+    # post_inference: {pool_path, out_csv} or a list of them: the selected model also predicts unlabeled
+    # pools (TASK-287; lists since TASK-310). summary["post_inference"] mirrors the config's shape.
+    post_cfg = config.get("post_inference") or []
+    done = []
+    for item in [post_cfg] if isinstance(post_cfg, dict) else post_cfg:
+        n = predict_pool(model, item["pool_path"], item["out_csv"], target_columns, device,
+                         int(item.get("batch_size", train_cfg["batch_size"])), int(train_cfg.get("num_workers", 8)))
+        done.append({"pool_path": item["pool_path"], "out_csv": item["out_csv"], "molecules": n})
+    if done:
+        summary["post_inference"] = done[0] if isinstance(post_cfg, dict) else done
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print("TEST " + json.dumps(test_metrics), flush=True)
     if wandb_run is not None:

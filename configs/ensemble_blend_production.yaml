@@ -1,51 +1,71 @@
-# Production blend promoted 2026-11-03 (user decision; replaces KNOW-261's configs/ensemble_blend_wave_b.yaml):
-# UMA richind x3 + UMA richind S+T x3 + distilled ViSNet x3, weights chosen on val (0.45/0.20/0.35),
-# singlets sorted per molecule. Triplets T1-T5 come from the uma_richind_st group alone.
+# Weight selection for production (configs/production.yaml, TASK-310). Promoted 2026-11-11 (user decision):
+# he4 = heavy-aux UMA heads x3 + heavy-aux UMA S+T x3 + distilled ViSNet x3 + heavy-aux UMA delta,
+# weights chosen on val (0.40/0.10/0.35/0.15 with he_delta s17 alone). he_delta s18/s19 (wave F) are
+# skipped until their prediction files exist; rerun scripts/blend_predictions.py once they land.
+# The 2026-11-03 three-family blend (KNOW-288) stays as the first blend for comparison.
 grid_step: 0.05
 members:
   uma_richind_s17:
     val: runs/uma_qm9gwbse_richind_s17.val_predictions.csv
     test: runs/uma_qm9gwbse_richind_s17.test_predictions.csv
-  uma_richind_st_s17:
-    val: runs/uma_qm9gwbse_richind_st_s17.val_predictions.csv
-    test: runs/uma_qm9gwbse_richind_st_s17.test_predictions.csv
-  distill_s17:
-    val: runs/ensemble_preds/distill_s17.val_predictions.csv
-    test: runs/ensemble_preds/distill_s17.test_predictions.csv
   uma_richind_s18:
     val: runs/uma_qm9gwbse_richind_s18.val_predictions.csv
     test: runs/uma_qm9gwbse_richind_s18.test_predictions.csv
-  uma_richind_st_s18:
-    val: runs/uma_qm9gwbse_richind_st_s18.val_predictions.csv
-    test: runs/uma_qm9gwbse_richind_st_s18.test_predictions.csv
-  distill_s18:
-    val: runs/ensemble_preds/distill_s18.val_predictions.csv
-    test: runs/ensemble_preds/distill_s18.test_predictions.csv
   uma_richind_s19:
     val: runs/uma_qm9gwbse_richind_s19.val_predictions.csv
     test: runs/uma_qm9gwbse_richind_s19.test_predictions.csv
+  uma_richind_st_s17:
+    val: runs/uma_qm9gwbse_richind_st_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s17.test_predictions.csv
+  uma_richind_st_s18:
+    val: runs/uma_qm9gwbse_richind_st_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_s18.test_predictions.csv
   uma_richind_st_s19:
     val: runs/uma_qm9gwbse_richind_st_s19.val_predictions.csv
     test: runs/uma_qm9gwbse_richind_st_s19.test_predictions.csv
+  distill_s17:
+    val: runs/ensemble_preds/distill_s17.val_predictions.csv
+    test: runs/ensemble_preds/distill_s17.test_predictions.csv
+  distill_s18:
+    val: runs/ensemble_preds/distill_s18.val_predictions.csv
+    test: runs/ensemble_preds/distill_s18.test_predictions.csv
   distill_s19:
     val: runs/ensemble_preds/distill_s19.val_predictions.csv
     test: runs/ensemble_preds/distill_s19.test_predictions.csv
+  he_heads_s17:
+    val: runs/uma_qm9gwbse_richind_he_heads_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s17.test_predictions.csv
+  he_heads_s18:
+    val: runs/uma_qm9gwbse_richind_he_heads_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s18.test_predictions.csv
+  he_heads_s19:
+    val: runs/uma_qm9gwbse_richind_he_heads_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_heads_s19.test_predictions.csv
+  st_he_heads_s17:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s17.test_predictions.csv
+  st_he_heads_s18:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s18.test_predictions.csv
+  st_he_heads_s19:
+    val: runs/uma_qm9gwbse_richind_st_he_heads_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s19.test_predictions.csv
+  he_delta_s17:
+    val: runs/uma_qm9gwbse_richind_he_delta_s17.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_delta_s17.test_predictions.csv
+  he_delta_s18:
+    val: runs/uma_qm9gwbse_richind_he_delta_s18.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_delta_s18.test_predictions.csv
+  he_delta_s19:
+    val: runs/uma_qm9gwbse_richind_he_delta_s19.val_predictions.csv
+    test: runs/uma_qm9gwbse_richind_he_delta_s19.test_predictions.csv
 groups:
-  uma_richind:
-  - uma_richind_s17
-  - uma_richind_s18
-  - uma_richind_s19
-  uma_richind_st:
-  - uma_richind_st_s17
-  - uma_richind_st_s18
-  - uma_richind_st_s19
-  distill:
-  - distill_s17
-  - distill_s18
-  - distill_s19
+  uma_richind: [uma_richind_s17, uma_richind_s18, uma_richind_s19]
+  uma_richind_st: [uma_richind_st_s17, uma_richind_st_s18, uma_richind_st_s19]
+  distill: [distill_s17, distill_s18, distill_s19]
+  he_heads: [he_heads_s17, he_heads_s18, he_heads_s19]
+  st_he_heads: [st_he_heads_s17, st_he_heads_s18, st_he_heads_s19]
+  he_delta: [he_delta_s17, he_delta_s18, he_delta_s19]
 blends:
-- - uma_richind
-  - distill
-- - uma_richind
-  - uma_richind_st
-  - distill
+- [uma_richind, uma_richind_st, distill]
+- [he_heads, st_he_heads, distill, he_delta]

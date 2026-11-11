@@ -1,0 +1,37 @@
+# Production excited-state ensemble (TASK-310). Promoted 2026-11-11 by user decision; replaces the
+# three-family blend of configs/ensemble_blend_production.yaml as of 2026-11-03 (KNOW-288).
+# Singlets: weighted blend of seed-averaged families (weights chosen on QM9GWBSE val in wave E, KNOW-306),
+# guarded per molecule (a family with non-finite or out-of-range energies is dropped), five energies sorted.
+# Triplets: equal blend of the two S+T families (T-agg 0.04641 vs 0.04714 for uma_richind_st alone).
+# `test` is the family's QM9GWBSE test prediction file, `external` its prediction on
+# data/processed/external_testsets/pool.npz; {seed} is filled from `seeds`.
+singlets:
+  - family: he_heads
+    weight: 0.40
+    seeds: [17, 18, 19]
+    test: runs/uma_qm9gwbse_richind_he_heads_s{seed}.test_predictions.csv
+    external: runs/head_to_head/ext_uma_richind_he_heads_s{seed}.csv
+  - family: st_he_heads
+    weight: 0.10
+    seeds: [17, 18, 19]
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s{seed}.test_predictions.csv
+    external: runs/head_to_head/ext_uma_richind_st_he_heads_s{seed}.csv
+  - family: distill
+    weight: 0.35
+    seeds: [17, 18, 19]
+    test: runs/ensemble_preds/distill_s{seed}.test_predictions.csv
+    external: runs/head_to_head/ext_distill_s{seed}.csv
+  - family: he_delta
+    weight: 0.15
+    seeds: [17]
+    test: runs/uma_qm9gwbse_richind_he_delta_s{seed}.test_predictions.csv
+    external: runs/head_to_head/ext_uma_richind_he_delta_s{seed}.csv
+triplets:
+  - family: uma_richind_st
+    weight: 0.50
+    seeds: [17, 18, 19]
+    test: runs/uma_qm9gwbse_richind_st_s{seed}.test_predictions.csv
+  - family: st_he_heads
+    weight: 0.50
+    seeds: [17, 18, 19]
+    test: runs/uma_qm9gwbse_richind_st_he_heads_s{seed}.test_predictions.csv
