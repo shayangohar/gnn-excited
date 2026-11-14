@@ -28,21 +28,24 @@ module load miniforge3-python
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate /projects/bhzu/gnn-excited/envs/uma-fairchem
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+# The env's python by full path: a caller that already activated a conda env (the wave F smoke ran this
+# script with `bash` inside one) leaves miniforge's base python first on PATH, which has no torch.
+PY=/projects/bhzu/gnn-excited/envs/uma-fairchem/bin/python
 F=${FEATURE_DIR:-data/processed/uma_features}/${FEATURES:?set FEATURES=ft or pt}
 mkdir -p $(dirname $F) ${RUN_DIR:-runs/bet_a}
 EPOCHS=${EPOCHS:-150}
 if [ ! -f $F.meta.npz ]; then
   if [ "$FEATURES" = ft ]; then
-    python scripts/extract_uma_features.py --checkpoint checkpoints/uma_qm9gwbse_richind_s17.pt \
+    $PY scripts/extract_uma_features.py --checkpoint checkpoints/uma_qm9gwbse_richind_s17.pt \
       --config configs/uma_qm9gwbse_richind_s17.yaml --out $F ${LIMIT:+--limit $LIMIT}
   else
-    python scripts/extract_uma_features.py --pretrained --checkpoint checkpoints/uma/checkpoints/uma-s-1p2p1.pt \
+    $PY scripts/extract_uma_features.py --pretrained --checkpoint checkpoints/uma/checkpoints/uma-s-1p2p1.pt \
       --out $F ${LIMIT:+--limit $LIMIT}
   fi
 fi
 for kind in ${KINDS:-mlp r0 r1}; do
   for seed in ${SEEDS:-17 18 19}; do
-    python scripts/train_frozen_decoder.py --features $F --kind $kind --seed $seed --epochs $EPOCHS \
+    $PY scripts/train_frozen_decoder.py --features $F --kind $kind --seed $seed --epochs $EPOCHS \
       --out ${RUN_DIR:-runs/bet_a}/${FEATURES}_${kind}_s${seed}
   done
 done
