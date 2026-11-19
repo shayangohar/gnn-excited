@@ -67,12 +67,20 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--limit", type=int, default=None, help="first N molecules only (smoke tests)")
+    parser.add_argument("--device", default="cuda", help="cuda or cpu (cpu is fine for small pools)")
     args = parser.parse_args()
     if not args.pretrained and not args.config:
         raise SystemExit("--config is required unless --pretrained")
-    device = torch.device("cuda")
+    device = torch.device(args.device)
     patch_mole_split_forward()
     arrays = dict(np.load(args.packed, allow_pickle=False))
+    # An unlabeled pool (e.g. data/processed/external_testsets/pool.npz) has no targets or split: features
+    # need neither, so fill placeholders (TASK-328 recalibration baselines).
+    if "targets" not in arrays:
+        arrays["targets"] = np.zeros((arrays["molecule_key"].shape[0], len(DEFAULT_COLUMNS)), dtype=np.float32)
+        arrays["target_columns"] = np.array(DEFAULT_COLUMNS)
+    if "split" not in arrays:
+        arrays["split"] = np.array(["pool"] * arrays["molecule_key"].shape[0])
     n_mol = arrays["molecule_key"].shape[0] if args.limit is None else min(args.limit, arrays["molecule_key"].shape[0])
     model = build_model(args, arrays).to(device).eval()
     available = [str(c) for c in arrays["target_columns"]]
