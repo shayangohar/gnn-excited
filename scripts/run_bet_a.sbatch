@@ -31,6 +31,11 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 # The env's python by full path: a caller that already activated a conda env (the wave F smoke ran this
 # script with `bash` inside one) leaves miniforge's base python first on PATH, which has no torch.
 PY=/projects/bhzu/gnn-excited/envs/uma-fairchem/bin/python
+# FEATURES=pt reads the pretrained backbone in PT_CKPT (default UMA-S; KNOW-326 probes uma-m-1p1). GATE, if set,
+# names a file that must exist or the job exits at once (e.g. the UMA-M smoke output, so a failed
+# download costs seconds instead of a stuck dependency).
+PT_CKPT=${PT_CKPT:-checkpoints/uma/checkpoints/uma-s-1p2p1.pt}
+if [ -n "${GATE:-}" ] && [ ! -f "$GATE" ]; then echo "GATE $GATE missing; not running"; exit 1; fi
 F=${FEATURE_DIR:-data/processed/uma_features}/${FEATURES:?set FEATURES=ft or pt}
 mkdir -p $(dirname $F) ${RUN_DIR:-runs/bet_a}
 EPOCHS=${EPOCHS:-150}
@@ -39,7 +44,7 @@ if [ ! -f $F.meta.npz ]; then
     $PY scripts/extract_uma_features.py --checkpoint checkpoints/uma_qm9gwbse_richind_s17.pt \
       --config configs/uma_qm9gwbse_richind_s17.yaml --out $F ${LIMIT:+--limit $LIMIT}
   else
-    $PY scripts/extract_uma_features.py --pretrained --checkpoint checkpoints/uma/checkpoints/uma-s-1p2p1.pt \
+    $PY scripts/extract_uma_features.py --pretrained --checkpoint $PT_CKPT \
       --out $F ${LIMIT:+--limit $LIMIT}
   fi
 fi
