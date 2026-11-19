@@ -38,7 +38,7 @@ training:
   bf16: false
   mole_split_patch: true
   num_workers: 8
-  max_hours: 18
+  max_hours: 9  # job limit lowered to 10 h on 2026-11-18 (KNOW-335); stop cleanly before it
   scheduler:
     warmup_epochs: 2
     start_factor: 0.01
