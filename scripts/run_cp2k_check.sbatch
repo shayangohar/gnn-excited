@@ -28,14 +28,15 @@ export APPTAINER_CACHEDIR=/tmp/$USER/apptainer_$SLURM_JOB_ID && mkdir -p $APPTAI
 if [ ! -f $SIF ]; then
   apptainer pull $SIF docker://cp2k/cp2k:2026.2_openmpi_generic_psmp
 fi
-RUN="apptainer exec --bind /projects $SIF /opt/cp2k/install/bin/launch"  # the image entrypoint sets PATH, libraries and MPI
-export CP2K_DATA_DIR=/opt/cp2k/install/share/cp2k/data
-export OMP_NUM_THREADS=1 OMPI_MCA_rmaps_base_oversubscribe=1
+# --cleanenv: the container's OpenMPI (PRRTE) otherwise sees SLURM_* and tries srun (not in the image) with 1 slot.
+# The image's launch entrypoint sets PATH, libraries and MPI settings.
+RUN="apptainer exec --cleanenv --env OMP_NUM_THREADS=1,CP2K_DATA_DIR=/opt/cp2k/install/share/cp2k/data --bind /projects $SIF /opt/cp2k/install/bin/launch"
+MPI="mpirun --bind-to none --map-by :OVERSUBSCRIBE"
 $RUN bash -c 'which cp2k.psmp mpirun; ls $CP2K_DATA_DIR | head -5; cp2k.psmp --version | head -30'
 W=runs/cp2k_check; mkdir -p $W/h2
 cp data/external/cp2k/BSE_H2.inp data/external/cp2k/BASIS-aug $W/h2/
 start=$(date +%s)
-(cd $W/h2 && $RUN mpirun -n 4 cp2k.psmp -i BSE_H2.inp -o BSE_H2.out) || echo "H2 example failed"
+(cd $W/h2 && $RUN $MPI -n 4 cp2k.psmp -i BSE_H2.inp -o BSE_H2.out) || echo "H2 example failed"
 echo "H2 example: $(( $(date +%s) - start )) s"
 grep -E "Singlet +-ABBA-" $W/h2/BSE_H2.out | head -4 || true
 PY=/projects/bhzu/gnn-excited/envs/gnn-excited-delta/bin/python
@@ -49,7 +50,7 @@ print(min(rows, key=lambda r: int(r["natoms"]))["molecule_key"])
 PY
 )
 echo "OE62H molecule: $EXT"
-$PY scripts/cp2k_gwbse.py --cmd "$RUN mpirun -n 64 cp2k.psmp" --basis data/external/cp2k/BASIS-aug-ccpvdz \
+$PY scripts/cp2k_gwbse.py --cmd "$RUN $MPI -n 64 cp2k.psmp" --basis data/external/cp2k/BASIS-aug-ccpvdz \
   --qm9-heavy 3 6 9 --external "$EXT"
 rm -rf $APPTAINER_CACHEDIR
 echo CP2K_CHECK_DONE
