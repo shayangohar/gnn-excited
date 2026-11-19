@@ -28,9 +28,10 @@ export APPTAINER_CACHEDIR=/tmp/$USER/apptainer_$SLURM_JOB_ID && mkdir -p $APPTAI
 if [ ! -f $SIF ]; then
   apptainer pull $SIF docker://cp2k/cp2k:2026.2_openmpi_generic_psmp
 fi
-RUN="apptainer exec --bind /projects $SIF"
+RUN="apptainer exec --bind /projects $SIF /opt/cp2k/install/bin/launch"  # the image entrypoint sets PATH, libraries and MPI
+export CP2K_DATA_DIR=/opt/cp2k/install/share/cp2k/data
 export OMP_NUM_THREADS=1 OMPI_MCA_rmaps_base_oversubscribe=1
-$RUN bash -c 'which cp2k.psmp cp2k 2>/dev/null; echo CP2K_DATA_DIR=$CP2K_DATA_DIR; cp2k.psmp --version | head -30'
+$RUN bash -c 'which cp2k.psmp mpirun; ls $CP2K_DATA_DIR | head -5; cp2k.psmp --version | head -30'
 W=runs/cp2k_check; mkdir -p $W/h2
 cp data/external/cp2k/BSE_H2.inp data/external/cp2k/BASIS-aug $W/h2/
 start=$(date +%s)
