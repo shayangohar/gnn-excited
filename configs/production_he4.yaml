@@ -1,6 +1,5 @@
-# CANDIDATE "he5" (TASK-310, not promoted): he4 with he_delta at three seeds (s17-19) and the singlet weights
-# re-chosen on QM9GWBSE val (runs/ensemble_blend_production_f.summary.json). Compare with
-# scripts/compare_production.py before any promotion. The he4 header follows for reference:
+# ARCHIVED he4 (KNOW-311): production from 2026-11-11 to 2026-11-19, superseded by he5 (configs/production.yaml,
+# TASK-320). Kept for comparisons, e.g. scripts/compare_production.py --base configs/production_he4.yaml.
 # Production excited-state ensemble (TASK-310). Promoted 2026-11-11 by user decision; replaces the
 # three-family blend of configs/ensemble_blend_production.yaml as of 2026-11-03 (KNOW-288).
 # Singlets: weighted blend of seed-averaged families (weights chosen on QM9GWBSE val in wave E, KNOW-306),
@@ -10,12 +9,12 @@
 # data/processed/external_testsets/pool.npz; {seed} is filled from `seeds`.
 singlets:
   - family: he_heads
-    weight: 0.30
+    weight: 0.40
     seeds: [17, 18, 19]
     test: runs/uma_qm9gwbse_richind_he_heads_s{seed}.test_predictions.csv
     external: runs/head_to_head/ext_uma_richind_he_heads_s{seed}.csv
   - family: st_he_heads
-    weight: 0.05
+    weight: 0.10
     seeds: [17, 18, 19]
     test: runs/uma_qm9gwbse_richind_st_he_heads_s{seed}.test_predictions.csv
     external: runs/head_to_head/ext_uma_richind_st_he_heads_s{seed}.csv
@@ -25,8 +24,8 @@ singlets:
     test: runs/ensemble_preds/distill_s{seed}.test_predictions.csv
     external: runs/head_to_head/ext_distill_s{seed}.csv
   - family: he_delta
-    weight: 0.30
-    seeds: [17, 18, 19]
+    weight: 0.15
+    seeds: [17]
     test: runs/uma_qm9gwbse_richind_he_delta_s{seed}.test_predictions.csv
     external: runs/head_to_head/ext_uma_richind_he_delta_s{seed}.csv
 triplets:

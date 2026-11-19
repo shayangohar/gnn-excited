@@ -20,7 +20,8 @@ def test_production_spec_loads_and_weights_sum_to_one():
     singlets = load_production(ROOT / "configs/production.yaml", "singlets")
     triplets = load_production(ROOT / "configs/production.yaml", "triplets")
     assert [f["family"] for f in singlets] == ["he_heads", "st_he_heads", "distill", "he_delta"]
-    assert [f["weight"] for f in singlets] == [0.40, 0.10, 0.35, 0.15]
+    assert [f["weight"] for f in singlets] == [0.30, 0.05, 0.35, 0.30]
+    assert next(f for f in singlets if f["family"] == "he_delta")["seeds"] == [17, 18, 19]
     assert {f["family"] for f in triplets} == {"uma_richind_st", "st_he_heads"}
     assert all("{seed}" in f["test"] for f in singlets + triplets)
     assert all("{seed}" in f["external"] for f in singlets)

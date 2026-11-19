@@ -55,8 +55,13 @@ def embed(smiles: str, seed: int = 0, forcefield: str = "MMFF", max_iters: int =
 
 
 def xtb_optimize(numbers: np.ndarray, positions: np.ndarray, xtb: str, charge: int = 0, uhf: int = 0,
-                 level: str = "normal", timeout: int = 600) -> np.ndarray | None:
-    """GFN2-xTB optimised positions, or None if xtb fails or does not converge."""
+                 level: str = "normal", timeout: int = 600, return_energy: bool = False):
+    """GFN2-xTB optimised positions, or None if xtb fails or does not converge.
+
+    With return_energy, (positions, total energy in hartree) from the xtbopt.xyz comment line instead.
+    """
+    import re
+
     from rdkit import Chem
 
     table = Chem.GetPeriodicTable()
@@ -71,8 +76,13 @@ def xtb_optimize(numbers: np.ndarray, positions: np.ndarray, xtb: str, charge: i
         out = Path(workdir, "xtbopt.xyz")
         if result.returncode != 0 or not out.exists() or "GEOMETRY OPTIMIZATION CONVERGED" not in result.stdout:
             return None
-        rows = [line.split() for line in out.read_text().splitlines()[2:2 + len(numbers)]]
-        return np.array([[float(v) for v in r[1:4]] for r in rows], dtype=np.float64)
+        text = out.read_text().splitlines()
+        rows = [line.split() for line in text[2:2 + len(numbers)]]
+        pos = np.array([[float(v) for v in r[1:4]] for r in rows], dtype=np.float64)
+        if not return_energy:
+            return pos
+        match = re.search(r"energy:\s*(-?\d+\.\d+)", text[1])
+        return (pos, float(match.group(1))) if match else None
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
     finally:
